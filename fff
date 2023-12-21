@@ -446,6 +446,9 @@ show_help() {
 
 	Then simply open editor on the target system and paste text
 	or use "cat > fff" , paste and type Ctrl-D
+
+	Alternatively, download the file from Web using 'wget https://raw.githubusercontent.com/ibox0/fff/main/fff'
+
 	When done, chmod 755 fff
 	You can now start the game!
 
