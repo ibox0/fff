@@ -1,0 +1,2916 @@
+#!/usr/bin/env bash
+#
+# fff - fucking fast file-manager.
+VER="2.96d"
+declare -A TABS_LOCATION
+FFF_HOME="${HOME}/.local/share/fff"
+FFF_BOOKMARKS_DIR="${FFF_HOME}/bookmarks"
+FFF_SAVED_TABS_DIR="${FFF_HOME}/tabs"
+FFF_SCRATCHPAD_DIR="${FFF_HOME}/scratchpad"
+FFF_HIST_DIR="${FFF_HOME}/history"
+FFF_MENU_DIR="${FFF_HOME}/menu"
+FFF_MAXLINES=500
+FFF_MAXDEPTH=5
+FFF_TIMEOUT=20
+FFF_FILE_SIZE_THRESHOLD=-1
+FFF_DO_NOT_TRAVERSE_MOUNTS="-mount"
+TMPDIR=${TMPDIR:-/tmp}
+group_by="d"
+group_filter=""
+
+# SPECIAL SHELL MANAGEMENT FOR fff used as tmux shell
+if [ "$SHELL" != "" ] && [ $(basename $SHELL) = "fff" ]; then
+	if [ -e /bin/bash ]; then
+		SHELL=/bin/bash
+	else
+		SHELL=/bin/sh
+	fi
+fi
+# SHELL OPTS
+myshell=$(basename $SHELL) 
+# FFF env variable
+mydir=$(dirname $0)
+myname=$(basename $0)
+mydir_fullpath=$(cd $mydir && pwd)
+if [ "$FFF" = "" ]; then
+	export FFF="$mydir_fullpath/$myname"
+fi
+
+case $myshell in 
+	sh)
+		SHELL_OPTS=""
+		;;
+	zsh)
+		SHELL_OPTS="-f"
+		;;
+	bash)
+	#	SHELL_OPTS="--norc"
+		SHELL_OPTS=""
+		;;
+	*)
+		SHELL_OPTS=""
+		;;
+esac
+
+# FIXME: grouped view mode to be completed: filter is missing, checks for huge runs (eg from /)
+lsd() {
+	case $group_by in
+		"d")
+			gst="%Td_%Tb_%Ty"
+			;;
+		"m")
+			gst="%Tb_%Ty"
+			;;
+		"y")
+			gst="%TY"
+			;;
+		"w")
+			gst="%TW_%TY"
+			;;
+		"*")
+			gst="unknown"
+			;;
+    esac
+	
+    if [ "$group_filter" != "" ]; then
+	filtercmd="*${group_filter}*"
+    else
+        filtercmd="*"
+    fi
+    #descend_linkopt="-L"
+    # for now this is safer
+    descend_linkopt=""
+#    descend_linkopt="-L"
+# NOTE: for MacOS use gfind or gnu find https://stackoverflow.com/questions/752818/find-lacks-the-option-printf-now-what
+
+# default command
+#    find ${descend_linkopt} . -type f -name "$filtercmd"  -printf "%T@ %p $gst\0" 2> /dev/null | sort -zk 1nr |  tr "\0" "\n" | awk -vMAXLINES=5000 -vcwd="$PWD" '{if (ct++ > MAXLINES) { print ".... ...Output_Truncated_to_" MAXLINES "_files..." ; exit } ; i=index($0," "); print cwd "/" substr($0,i+1)}'
+    if [ "$FFF_FILE_SIZE_THRESHOLD" != "-1" ]; then
+	if [ "$FFF_FILE_SIZE_THRESHOLD" = "0" ]; then
+		fsizecmd="-size 0"
+	else
+		fsizecmd="-size +$FFF_FILE_SIZE_THRESHOLD" 
+	fi
+    else
+	fsizecmd=""
+    fi
+    # execution time is a combination from FFF_MAXLINES FFF_MAXDEPTH FFF_TIMEOUT
+    # important to have the timeout to avoid long searches that do not exit if then number of findings is hihger than FFF_MAXLINES
+    # the MAXDEPTH helps to find stuff "near" the position in the specified time
+    timeout $FFF_TIMEOUT stdbuf -oL -eL find ${descend_linkopt} . -maxdepth $FFF_MAXDEPTH $FFF_DO_NOT_TRAVERSE_MOUNTS -type f $fsizecmd -name "$filtercmd"  -printf "%T@ %p $gst\0" 2> /dev/null | sort -zk 1nr |  tr "\0" "\n" | awk -vMAXLINES=$FFF_MAXLINES -vcwd="$PWD" '{if (ct++ > MAXLINES) { print ".... ...Output_Truncated_to_" MAXLINES "_files..." ; exit } ; i=index($0," "); print cwd "/" substr($0,i+1)}'
+
+}
+
+# change dir with history
+hcd() {
+	target_dir="$1"
+	target_name="${target_dir//\//|}"
+	cmd_reply=""
+        file_search_filter=""
+	if [[ "$target_dir" =~ ^$FFF_HIST_DIR ]]; then
+		link_to_check="$target_dir"
+	else
+		link_to_check="${FFF_HIST_DIR}/$target_name"
+	fi
+	if [[ -e "${link_to_check}" ]]; then
+		touch -h "${link_to_check}"
+	else
+	  if [ "$target_dir" != ${FFF_HIST_DIR} ] && [[ $target_dir != ".." ]] && [[ !  "$PWD" =~ ^$FFF_HIST_DIR ]]; then
+		if [ ! -e "${FFF_HIST_DIR}/$target_name" ]; then
+			ln -s  "$target_dir" "${FFF_HIST_DIR}/$target_name"
+		fi
+	  fi
+	fi
+	cd -P "$target_dir"
+	restore_title
+}
+
+rename_window() {
+	if [ "$FFF_MULTIPLEXER" = "tmux" ]; then
+		tmux rename-window "$*"
+	fi
+}
+
+restore_title() {
+	        if [ "$FFF_MULTIPLEXER" != "" ]; then
+			if [ "$CURRENT_TAB" = "" ]; then
+				CURRENT_TAB=main
+			fi
+			wname=$(basename "$PWD")
+			rename_window "[$CURRENT_TAB]:$wname"
+		fi
+}
+compute_note_name() {
+	notename="$FFF_NOTES/${wname}_fffnotes.md"
+	# clash in note name, select different one
+	# FIXME: not implemented
+	echo "$notename"
+}
+
+# annotate the selected file and directory
+# FIXME: clash on names is not managed
+annotate() {
+	wname=$(basename "${list[scroll]}")
+	note=$(compute_note_name)
+	if  [ "$note" = "" ]; then
+		notify "Note name clash not yet implemented! Re-using same file!"
+		return
+	fi
+	rename_window "Annotate:$wname"
+	if [ ! -e "$note" ]; then
+		echo "# Notes For: ${list[scroll]}" > "$note"
+	fi
+	clear_screen
+        reset_terminal
+    	"${EDITOR:-vi}" "$note"
+	if [ -z "$note" ]; then
+		# remove note file if empty
+		rm "$note"
+	fi
+    	setup_terminal
+	redraw
+	restore_title
+}
+
+# check if annotated files are pointing to valid entries and tries to fix 
+annotations_housekeeper() {
+	clear_screen
+        reset_terminal
+	nowrongtarget=1
+	find $FFF_NOTES -name "*.md" > "$FFF_NOTES/.notes_list"
+	if [ $(cat "$FFF_NOTES/.notes_list" | wc -l) -gt 0 ]; then
+		echo "There are notes pointing to invalid files"
+#		echo -n "Specify path to look for changes [leave empty to skip]: "
+#		read -e searchpath
+		oldIFS=${IFS}
+		IFS="
+"
+		for notefile in $(cat "$FFF_NOTES/.notes_list"); do
+		target=$(awk -vFS="# Notes For: " '{ if (NF>1) print $NF}' "$notefile")
+		if [ ! -e "$target" ] ; then
+			nowrongtarget=0
+			echo "Target {$target} not found"
+			echo -n "Specify path to look for changes [leave empty to skip]: "
+			read -e searchpath
+			if [ "$searchpath" != "" ]; then
+				tname=$(basename "$target")
+				echo "Searching for $tname under $searchpath ..."
+				candidates=$(find $searchpath -name "$tname") # | awk '{printf "%s.|.",$0}') 
+				if [ "$candidates" != "" ]; then
+					echo "Select one of the following candidates" 
+					select sel in "Edit $notefile" $candidates "Quit"; do 
+						case "$sel" in 
+							"Edit $notefile")
+								clear_screen
+							        reset_terminal
+							    	"${EDITOR:-vi}" "$notefile"
+								if [ -z "$notefile" ]; then
+									# remove note file if empty
+									rm "$notefile"
+									break
+								fi
+								;;
+							Quit)
+								break
+								;;
+							*)
+								echo selected $sel
+								mv "$notefile" "${notefile}.bak"
+								cat "${notefile}.bak" | awk -vnewtarget="$sel" '{
+								if (($1=="#") && ($2=="Notes") && ($3=="For:")) print "# Notes For: " newtarget
+								else print $0
+								}' > "$notefile"
+								if [ $? -eq 0 ]; then
+									echo "Target Changed to $sel"
+									rm "${notefile}.bak"
+								else
+									echo "Some error occured chaning target - Leaving unchanged"
+									mv "${notefile}.bak" "${notefile}"
+								fi
+								sleep 3
+								break
+								;;
+
+						esac
+					done
+				else
+					echo "No candidates found for $tname under $searchpath (type RETURN to continue)."
+					read ans
+				fi
+			fi
+		fi	
+	done
+	fi
+	rm "$FFF_NOTES/.notes_list" 2> /dev/null
+	IFS=${oldIFS}
+    	setup_terminal
+	redraw
+	if [ $nowrongtarget -eq 1 ]; then
+		notify "All notes are ok"
+	fi
+}
+build_tags() {
+	# clean existing tags
+	notify "Rebuilding tags ..."
+	if [ -d "$FFF_TAGS" ]; then
+		find "$FFF_TAGS" -type l -exec rm {} \; 
+		find "$FFF_TAGS" -type d -exec rmdir {} \;  2> /dev/null
+	fi
+	find $FFF_NOTES -name "*.md" | while read notefile ; do
+		taginfo=$(cat "$notefile" | awk '{
+			if (($1=="#") && ($2=="Notes") && ($3=="For:")) { target=$0; sub("# Notes For: ","",target) ; next }
+			st=$0
+			i=index(st,"#")
+			tag=""
+			st=substr(st,i)
+			i=1
+			while (i) {
+				# poormans check that char after # is not space or other #
+				ch=substr(st,i+1,1)
+				n=length(st)
+				while ((i<n) && (ch=="#")) {
+					i++
+					prevch=substr(st,i,1)
+					ch=substr(st,i+1,1)
+					if ((prevch=="#") && (ch=="#"))  { st=substr(st,i+1) ; i=index(st,"#"); n=length(st)  }
+				}	
+				if (i>1)   { st=substr(st,i+1) ; i=index(st,"#");  }
+				e=index(st," ")
+				if (e) tag=substr(st,i,e-1) ; else tag=substr(st,i)
+				if (tag && (substr(tag,1,1)=="#") ) {
+					gsub("#","",tag)
+					if (tag) if (tags) tags=tags ",#" tag ; else tags="#" tag
+				}
+				st=substr(st,2)
+				i=index(st,"#")
+				if (i) { st=substr(st,i) ; i=1}
+			} # end while
+			}
+			END {
+				if (target) print  target ";" tags
+			}')
+		if [ "$taginfo" != "" ]; then
+			filename=$(echo "$taginfo" | awk -vFS=";" '{ print $1 }')
+			tags=$(echo "$taginfo" | awk -vFS=";" '{ print $2 }')
+			if [ -e "$filename" ]; then
+				for tag in $(echo $tags | awk -vFS=, '{ for (i=1;i<=NF;i++) print $i }'); do
+					dir="$FFF_TAGS/$tag"
+					if [ ! -d "$dir" ]; then
+						mkdir -p "$dir"
+						ntag=$(( $ntag + 1 ))
+					fi
+					bname=$(basename "$filename")
+					if [ ! -e "$dir/$bname" ]; then
+						ln -s "$filename" "$dir/$bname"
+						ntagged=$(( $ntagged + 1 ))
+					fi
+				done
+			fi
+		fi
+	done
+	ntagged=$(find "$FFF_TAGS" -type l | wc -l) 
+	ntag=$(find "$FFF_TAGS" -type d  | wc -l)
+	notify "Tag rebuild completed (added $ntagged tagged objects in $ntag tags) ..."
+}
+
+# search in annoated files, creates links to found notes and pointed files
+search_annotate() {
+	notespad="${XDG_DATA_HOME:=${HOME}/.local/share}/fff/.notespad" 
+	if [ ! -d "$notespad" ]; then
+		mkdir -p "$notespad"
+	fi
+	cmd_line "Search notes: "
+	if [ "$cmd_reply" != "" ]; then
+		mstr="$cmd_reply"
+		if [ "$cmd_reply" = "*" ]; then
+			hcd "$FFF_NOTES"
+        		redraw full
+			return
+		fi
+		# clean existing findings
+		rm -f $notespad/* 2> /dev/null
+		grep -rli "$cmd_reply" "$FFF_NOTES" | while read found_note ; do
+			notename=$(basename "$found_note")
+			ln -s "$found_note" "$notespad/$notename"
+			target=$(awk -vFS="# Notes For: " '{ if (NF>1) print $NF}' "$found_note")
+			target_as_name=$(echo "$target" | awk '{gsub("/","-");print $0}')
+			fprompt=" >> "
+			if [ -d "$target" ]; then
+				tname="${notename}$fprompt goto $target_as_name"
+				ln -s "$target" "$notespad/$tname"
+			else
+				if [ -e "$target" ]; then
+					tname="${notename}$fprompt origin $target_as_name"
+					ln -s "$target" "$notespad/$tname"
+				else
+					ln -s /dev/null "$notespad/${notename}$fprompt missing $target_as_name" 
+				fi
+			fi
+		done
+		ctf=$(cd "$notespad" ; ls | wc -l)
+		if [ $ctf -eq 0 ]; then
+			notify -d 3 "No notes found matching $cmd_reply" 
+		else
+			hcd "$notespad"
+			rename_window "Annotated as $mstr"
+        		redraw full
+		fi
+	fi
+}
+show_colors() {
+    for cname in 0 1 2 3 4 5 6 7 8 9 10 11; do
+		cformat=\\e[3${FFF_COL3:-$cname}m${mark_pre}
+		csuffix=${mark_post}
+		printf '\n%b%s\e[m\n' \
+                  "${cformat}${cname}${csuffix}"
+    done
+}
+
+# show help page
+show_help() {
+	header="----------------------------------"
+	reset_terminal
+	cat << EOH | ${PAGER:-less}
+
+	FFF v. $VER
+
+	$header Selection of items
+        ${FFF_KEY_YANK:=y}|${FFF_KEY_YANK_ALL:=Y}		Mark file/ALL for copy (yank)
+        ${FFF_KEY_MOVE:=m}|${FFF_KEY_MOVE_ALL:=M}		Mark file/ALL for move
+        ${FFF_KEY_LINK:=s}|${FFF_KEY_LINK_ALL:=S}		Mark file/ALL for symlink
+        ${FFF_KEY_TRASH:=d}|${FFF_KEY_TRASH_ALL:=D}		Mark file/ALL for deletion (to trash)
+        ${FFF_KEY_BULK_RENAME:=b}|${FFF_KEY_BULK_RENAME_ALL:=B}		Mark file/ALL for bulk rename
+	${FFF_KEY_SYMLINK_DEREFERENCE:="^"}		Switch betweeen copy link/file for linked files
+        ${FFF_KEY_CLEAR:=c}		Clear selection
+
+	$header Move / View modes in current list
+        ${FFF_KEY_CHILD1:=l}|Enter|Right	Goto (open) child
+        ${FFF_KEY_PARENT1:=h}|Left|BkSpace	Goto Parent
+        ${FFF_KEY_SCROLL_DOWN1:=j}|Down		Scroll down
+        ${FFF_KEY_SCROLL_PGDOWN1:=J}		Page Scroll down
+        ${FFF_KEY_SCROLL_UP1:=k}|Up		Scroll up
+        ${FFF_KEY_SCROLL_PGUP1:=K}		Page Scroll up 
+        ${FFF_KEY_TO_TOP:=g}|Home		Go Top
+        ${FFF_KEY_TO_BOTTOM:=G}|End		Go Bottom
+        ${FFF_KEY_HIDDEN:=.}		Show/Hide hidden files
+        ${FFF_KEY_SIZE:=_}		View 0 size files, all non zero files, all files or files greater than specified size
+        ${FFF_KEY_SETTINGS:=@}		View/Change Settings
+        ${FFF_KEY_SORT_ORDER:=o}		Set Sort order
+        ${FFF_KEY_GROUP_FILTER:="|"}		Set Group filter (string to filter when showing in "Grouped by")
+        ${FFF_KEY_SWITCH_SORT_ORDER:=O}		Switch Sort order
+        ${FFF_KEY_SEARCH:=/}		Search (filter) files in current dir
+        ${FFF_KEY_SEARCH_TO_SCRATCHPAD:=F}		Find files and save results in ScratchPad
+        ${FFF_KEY_REFRESH:=e}		Refresh list and Redraw screen
+        ${FFF_KEY_CLIPCOPY:=I}		Copy fff to clipboard to install it on other systems
+        ${FFF_KEY_HELP:="?"}		Show this help
+        q|Ctrl-d	Quit
+	$header Actions on targets
+        ${FFF_KEY_CHILD1:=l}|Enter|Right	Goto (open) child
+        ${FFF_KEY_VIEW:=v}		View file with PAGER (with 'less', type v to edit file) - View dir size
+        ${FFF_KEY_MENU:==}		Open custom commands menu
+        ${FFF_KEY_SHELL:=!}		Open shell in current dir
+        ${FFF_KEY_RUN_WITH_SHELL:=\"}		Open target with shell 
+        ${FFF_KEY_PASTE:=p}		Paste (executes copy/move/link/delete operation)
+        ${FFF_KEY_RENAME:=r}		Rename File
+        ${FFF_KEY_MKDIR:=n}		Make dir
+        ${FFF_KEY_MKFILE:=f}		Create file
+        ${FFF_KEY_CLEANLINK:=R}		Remove broken links in current directory
+        ${FFF_KEY_ATTRIBUTES:=x}|Space		Show file attributes
+        ${FFF_KEY_SHOW_FILES_VERBOSE:=L}       	Show attributes, sizes and dates of current list
+        ${FFF_KEY_EXECUTABLE:=X}		Mark file as executable
+        ${FFF_KEY_IMAGE:=i}		Show image
+	$header Directory navigation and bookmarks
+        ${FFF_KEY_GO_DIR:=:}		Goto Dir
+        ${FFF_KEY_GO_HOME:='~'}|${FFF_KEY_GO_HOME_ALT:=H}		Goto Home
+        ${FFF_KEY_GO_TRASH:=t}		Goto Trash
+        ${FFF_KEY_PREVIOUS:=-}		Goto Previous dir
+        ${FFF_KEY_GO_HIST:='\\'}		Goto History
+        ${FFF_KEY_SCRATCHPAD:=P}		Goto ScratchPad dir
+	0		Bookmark menu - show/goto/save & load bookmarks file
+	1-9		Goto Bookmark
+        ${FFF_KEY_ADD_BOOKMARK:=a}		Add/Set bookmark
+	$header Tabs
+        ${FFF_KEY_TAB_NEXT:=">"}		Goto Next Tab or create new tab if at end of list
+        ${FFF_KEY_TAB_PREV:="<"}		Goto Previous Tab
+	${FFF_KEY_TAB_MENU:=","}|Tab		Tab Menu (switch to tab, close tab, create tab, save or load tabs)
+	$header Annotations and Tags
+        ${FFF_KEY_ANNOTATE:="N"}		Annotate file or folder
+        ${FFF_KEY_SEARCH_NOTES:="'"}		Search for annotated files
+        ${FFF_KEY_HK_NOTES:="U"}		Annotation housekeeper
+        ${FFF_KEY_TAGS:="T"}			Go to Tags folder
+        ${FFF_KEY_BUILD_TAGS:="#"}		Rebuild Tags lists
+
+	To install fff on target host you can use the ${FFF_KEY_CLIPCOPY} command or xclip:
+
+		cat fff | xclip -sel c
+
+	Then simply open editor on the target system and paste text
+	or use "cat > fff" , paste and type Ctrl-D
+	When done, chmod 755 fff
+	You can now start the game!
+
+	Local fff saved data location: ${FFF_HOME}
+EOH
+	# for dev
+	# show_colors; read
+        redraw 
+}
+
+get_os() {
+    # Figure out the current operating system to set some specific variables.
+    # '$OSTYPE' typically stores the name of the OS kernel.
+    case $OSTYPE in
+        # Mac OS X / macOS.
+        darwin*)
+            opener=open
+            file_flags=bIL
+        ;;
+
+        haiku)
+            opener=open
+
+            [[ -z $FFF_TRASH_CMD ]] &&
+                FFF_TRASH_CMD=trash
+
+            [[ $FFF_TRASH_CMD == trash ]] && {
+                FFF_TRASH=$(finddir -v "$PWD" B_TRASH_DIRECTORY)
+                mkdir -p "$FFF_TRASH"
+            }
+        ;;
+    esac
+}
+
+setup_terminal() {
+    # Setup the terminal for the TUI.
+    # '\e[?1049h': Use alternative screen buffer.
+    # '\e[?7l':    Disable line wrapping.
+    # '\e[?25l':   Hide the cursor.
+    # '\e[2J':     Clear the screen.
+    # '\e[1;Nr':   Limit scrolling to scrolling area.
+    #              Also sets cursor to (0,0).
+    printf '\e[?1049h\e[?7l\e[?25l\e[2J\e[1;%sr' "$max_items"
+
+    # Hide echoing of user input
+    stty -echo
+}
+
+reset_terminal() {
+    # Reset the terminal to a useable state (undo all changes).
+    # '\e[?7h':   Re-enable line wrapping.
+    # '\e[?25h':  Unhide the cursor.
+    # '\e[2J':    Clear the terminal.
+    # '\e[;r':    Set the scroll region to its default value.
+    #             Also sets cursor to (0,0).
+    # '\e[?1049l: Restore main screen buffer.
+    printf '\e[?7h\e[?25h\e[2J\e[;r\e[?1049l'
+
+    # Show user input.
+    stty echo
+}
+
+clear_screen() {
+    # Only clear the scrolling window (dir item list).
+    # '\e[%sH':    Move cursor to bottom of scroll area.
+    # '\e[9999C':  Move cursor to right edge of the terminal.
+    # '\e[1J':     Clear screen to top left corner (from cursor up).
+    # '\e[2J':     Clear screen fully (if using tmux) (fixes clear issues).
+    # '\e[1;%sr':  Clearing the screen resets the scroll region(?). Re-set it.
+    #              Also sets cursor to (0,0).
+    printf '\e[%sH\e[9999C\e[1J%b\e[1;%sr' \
+           "$((LINES-2))" "${TMUX:+\e[2J}" "$max_items"
+}
+
+setup_options() {
+    # Some options require some setup.
+    # This function is called once on open to parse
+    # select options so the operation isn't repeated
+    # multiple times in the code.
+
+    # Format for normal files.
+    [[ $FFF_FILE_FORMAT == *%f* ]] && {
+        file_pre=${FFF_FILE_FORMAT/'%f'*}
+        file_post=${FFF_FILE_FORMAT/*'%f'}
+    }
+
+    # Format for marked files.
+    # Use affixes provided by the user or use defaults, if necessary.
+    if [[ $FFF_MARK_FORMAT == *%f* ]]; then
+        mark_pre=${FFF_MARK_FORMAT/'%f'*}
+        mark_post=${FFF_MARK_FORMAT/*'%f'}
+    else
+        mark_pre=" "
+        mark_post="*"
+    fi
+
+    # Find supported 'file' arguments.
+    file -I &>/dev/null || : "${file_flags:=biL}"
+
+    # Main Menu
+    FFF_MENU=${FFF_MENU:-$FFF_MENU_DIR/main}
+
+    # Load bookmarks
+    FFF_BOOKMARKS=${FFF_BOOKMARKS:-$FFF_BOOKMARKS_DIR/default}
+    [[ -e $FFF_BOOKMARKS ]] && . $FFF_BOOKMARKS
+
+    # empty=alphabetical (default and faster), t=modified time , rt=reverse modified time
+    FFF_SORT_ORDER=""
+
+    # TABS
+    FFF_TABS="main"
+    CURRENT_TAB="main"
+    TABS_LOCATION[$CURRENT_TAB]="$PWD"
+    # check availability of special commands
+    NCDU=$(which ncdu 2> /dev/null)
+    XCLIP=$(which xclip 2> /dev/null)
+}
+
+get_term_size() {
+    # Get terminal size ('stty' is POSIX and always available).
+    # This can't be done reliably across all bash versions in pure bash.
+    read -r LINES COLUMNS 2>/dev/null < <(stty size)
+
+    # Max list items that fit in the scroll area.
+    ((max_items=LINES-3))
+}
+
+get_ls_colors() {
+    # Parse the LS_COLORS variable and declare each file type
+    # as a separate variable.
+    # Format: ':.ext=0;0:*.jpg=0;0;0:*png=0;0;0;0:'
+    [[ -z $LS_COLORS ]] && {
+        FFF_LS_COLORS=0
+        return
+    }
+
+    # Turn $LS_COLORS into an array.
+    IFS=: read -ra ls_cols <<< "$LS_COLORS"
+
+    for ((i=0;i<${#ls_cols[@]};i++)); {
+        # Separate patterns from file types.
+        [[ ${ls_cols[i]} =~ ^\*[^\.] ]] &&
+            ls_patterns+="${ls_cols[i]/=*}|"
+
+        # Prepend 'ls_' to all LS_COLORS items
+        # if they aren't types of files (symbolic links, block files etc.)
+        [[ ${ls_cols[i]} =~ ^(\*|\.) ]] && {
+            ls_cols[i]=${ls_cols[i]#\*}
+            ls_cols[i]=ls_${ls_cols[i]#.}
+        }
+    }
+
+    # Strip non-ascii characters from the string as they're
+    # used as a key to color the dir items and variable
+    # names in bash must be '[a-zA-z0-9_]'.
+    ls_cols=("${ls_cols[@]//[^a-zA-Z0-9=\\;]/_}")
+
+    # Store the patterns in a '|' separated string
+    # for use in a REGEX match later.
+    ls_patterns=${ls_patterns//\*}
+    ls_patterns=${ls_patterns%?}
+
+    # Define the ls_ variables.
+    # 'declare' can't be used here as variables are scoped
+    # locally. 'declare -g' is not available in 'bash 3'.
+    # 'export' is a viable alternative.
+    export "${ls_cols[@]}" &>/dev/null
+}
+
+get_w3m_path() {
+    # Find the path to the w3m-img library.
+    w3m_paths=(/usr/{pkg/,}{local/,}{bin,lib,libexec,lib64,libexec64}/w3m/w3mi*)
+    read -r w3m _ 2>/dev/null < <(type -p "$FFF_W3M_PATH" w3mimgdisplay "${w3m_paths[@]}")
+}
+
+get_mime_type() {
+    # Get a file's mime_type.
+    mime_type=$(file "-${file_flags:-biL}" "$1" 2>/dev/null)
+}
+
+status_line() {
+    # Status_line to print when files are marked for operation.
+    local mark_ui="[${#marked_files[@]}] selected (${file_program[*]}) [p] ->"
+
+    # Escape the directory string.
+    # Remove all non-printable characters.
+    PWD_escaped=${PWD//[^[:print:]]/^[}
+    spaces=" "
+    if [ "$group_filter" != "" ] && [ "${FFF_SORT_ORDER}" == "g" ]; then
+    	PWD_escaped="|[$group_filter] $PWD_escaped"
+	spaces=""
+    fi
+    if [ "$file_search_filter" != "" ]; then
+    	PWD_escaped="{$file_search_filter}${spaces}$PWD_escaped"
+    fi
+    if [ "$FFF_FILE_SIZE_THRESHOLD" != -1 ] && [ "${FFF_SORT_ORDER}" == "g" ]; then
+      if [ "$FFF_FILE_SIZE_THRESHOLD" = 0 ]; then
+    	PWD_escaped="(sz0) $PWD_escaped"
+      else
+    	PWD_escaped="(sz+${FFF_FILE_SIZE_THRESHOLD}) $PWD_escaped"
+      fi
+    fi
+
+    # '\e7':       Save cursor position.
+    #              This is more widely supported than '\e[s'.
+    # '\e[%sH':    Move cursor to bottom of the terminal.
+    # '\e[30;41m': Set foreground and background colors.
+    # '%*s':       Insert enough spaces to fill the screen width.
+    #              This sets the background color to the whole line
+    #              and fixes issues in 'screen' where '\e[K' doesn't work.
+    # '\r':        Move cursor back to column 0 (was at EOL due to above).
+    # '\e[m':      Reset text formatting.
+    # '\e[H\e[K':  Clear line below status_line.
+    # '\e8':       Restore cursor position.
+    #              This is more widely supported than '\e[u'.
+    printf '\e7\e[%sH\e[3%s;4%sm%*s\r%s %s%s\e[m\e[%sH\e[K\e8' \
+           "$((LINES-1))" \
+           "${FFF_COL5:-0}" \
+           "${FFF_COL2:-1}" \
+           "$COLUMNS" "" \
+           "($((scroll+1))/$((list_total+1)))" \
+           "${marked_files[*]:+${mark_ui}}" \
+           "${1:-${PWD_escaped:-/}}" \
+           "$LINES"
+}
+
+read_dir() {
+    # Read a directory to an array and sort it directories first.
+    local dirs
+    local files
+    local item_index
+
+    # Set window name.
+    curdir=$(pwd)
+    wname=$(basename "$curdir")
+    printf '\e]2;fff: %s\e'\\ "$wname"
+
+    # If '$PWD' is '/', unset it to avoid '//'.
+    [[ $PWD == / ]] && PWD=
+    if [[ "${FFF_SORT_ORDER}" != "" ]]; then
+    	if [[ "${FFF_SORT_ORDER}" == "g" ]]; then
+		filelist=$(lsd  | grep -v share/fff/history  | awk -vheader="----------------" '{ tail=$NF ;  if (tail && ( tail != prevtail)) { print header tail header ; prevtail=tail } ; l=$0; sub(" " tail ,"",l) ;  gsub(" ","§",l); print l  }')
+	else
+		if [[ "$PWD" == "$FFF_HIST_DIR" ]]; then
+                	# Special management of hist dir by creation folder
+			sortopt=" -t"
+			#filelist=$(find . -maxdepth 1 -type l -printf "%T@§%p\0" | sort -zk 1nr  | tr "\0" "\n"| awk -vFS="§./" '{print $NF}' | awk -vprefix="$PWD" 'BEGIN { gsub(" ","§",prefix)} { if (($1==".") || ($1=="..")) next; fname=$0; gsub(" ","§",fname);  printf "%s/%s ",prefix,fname}')
+		else
+			sortopt="${FFF_SORT_ORDER}"
+		fi
+		filelist=$(ls -a${sortopt} "$PWD" | awk -vprefix="$PWD" 'BEGIN { gsub(" ","§",prefix)} { if (($1==".") || ($1=="..")) next; fname=$0; gsub(" ","§",fname);  printf "%s/%s ",prefix,fname}')
+	fi
+    else
+	filelist=$(ls -d * | awk -vprefix="$PWD" 'BEGIN { gsub(" ","§",prefix) } { gsub(" ","§"); printf "%s/%s ",prefix,$0 }')
+    fi
+    for item in $filelist; do
+	item=${item//§/ }
+        if [[ -d $item ]]; then
+            dirs+=("$item")
+
+            # Find the position of the child directory in the
+            # parent directory list.
+            [[ $item == "$OLDPWD" ]] &&
+                ((previous_index=item_index))
+            ((item_index++))
+        else
+            files+=("$item")
+        fi
+    done
+
+    list=("${dirs[@]}" "${files[@]}")
+
+    # Indicate that the directory is empty.
+    [[ -z ${list[0]} ]] &&
+        list[0]=empty
+
+    ((list_total=${#list[@]}-1))
+
+    # Save the original dir in a second list as a backup.
+    cur_list=("${list[@]}")
+}
+
+print_line() {
+    # Format the list item and print it.
+    local file_name=${list[$1]##*/}
+    local file_ext=${file_name##*.}
+    local format
+    local suffix
+
+    # If the dir item doesn't exist, end here.
+    if [[ -z ${list[$1]} ]]; then
+        return
+
+    # Directory.
+    elif [[ -d ${list[$1]} ]]; then
+        format+=\\e[${di:-1;3${FFF_COL1:-2}}m
+        suffix+=/
+
+    # Block special file.
+    elif [[ -b ${list[$1]} ]]; then
+        format+=\\e[${bd:-40;33;01}m
+
+    # Character special file.
+    elif [[ -c ${list[$1]} ]]; then
+        format+=\\e[${cd:-40;33;01}m
+
+    # Executable file.
+    elif [[ -x ${list[$1]} ]]; then
+        format+=\\e[${ex:-01;32}m
+
+    # Symbolic Link (broken).
+    elif [[ -h ${list[$1]} && ! -e ${list[$1]} ]]; then
+        format+=\\e[${mi:-01;31;7}m
+
+    # Symbolic Link.
+    elif [[ -h ${list[$1]} ]]; then
+        format+=\\e[${ln:-01;36}m
+
+    # Fifo file.
+    elif [[ -p ${list[$1]} ]]; then
+        format+=\\e[${pi:-40;33}m
+
+    # Socket file.
+    elif [[ -S ${list[$1]} ]]; then
+        format+=\\e[${so:-01;35}m
+
+    # Color files that end in a pattern as defined in LS_COLORS.
+    # 'BASH_REMATCH' is an array that stores each REGEX match.
+    elif [[ $FFF_LS_COLORS == 1 &&
+            $ls_patterns &&
+            $file_name =~ ($ls_patterns)$ ]]; then
+        match=${BASH_REMATCH[0]}
+        file_ext=ls_${match//[^a-zA-Z0-9=\\;]/_}
+        format+=\\e[${!file_ext:-${fi:-37}}m
+
+    # Color files based on file extension and LS_COLORS.
+    # Check if file extension adheres to POSIX naming
+    # standard before checking if it is a variable.
+    elif [[ $FFF_LS_COLORS == 1 &&
+            $file_ext != "$file_name" &&
+            $file_ext =~ ^[a-zA-Z0-9_]*$ ]]; then
+        file_ext=ls_${file_ext}
+        format+=\\e[${!file_ext:-${fi:-37}}m
+
+    else
+        format+=\\e[${fi:-37}m
+    fi
+
+    # If the list item is under the cursor.
+    (($1 == scroll)) &&
+        format+="\\e[1;3${FFF_COL4:-6};7m"
+
+    # If the list item is marked for operation.
+    [[ ${marked_files[$1]} == "${list[$1]:-null}" ]] && {
+        format+=\\e[3${FFF_COL3:-3}m${mark_pre}
+        suffix+=${mark_post}
+    }
+
+    # Escape the directory string.
+    # Remove all non-printable characters.
+    file_name=${file_name//[^[:print:]]/^[}
+
+    printf '\r%b%s\e[m\r' \
+        "${file_pre}${format}" \
+        "${file_name}${suffix}${file_post}"
+}
+
+
+draw_dir() {
+    # Print the max directory items that fit in the scroll area.
+    local scroll_start=$scroll
+    local scroll_new_pos
+    local scroll_end
+
+    # When going up the directory tree, place the cursor on the position
+    # of the previous directory.
+    ((find_previous == 1)) && {
+        ((scroll_start=previous_index))
+        ((scroll=scroll_start))
+
+        # Clear the directory history. We're here now.
+        find_previous=
+    }
+
+    # If current dir is near the top of the list, keep scroll position.
+    if ((list_total < max_items || scroll < max_items/2)); then
+        ((scroll_start=0))
+        ((scroll_end=max_items))
+        ((scroll_new_pos=scroll+1))
+
+    # If current dir is near the end of the list, keep scroll position.
+    elif ((list_total - scroll < max_items/2)); then
+        ((scroll_start=list_total-max_items+1))
+        ((scroll_new_pos=max_items-(list_total-scroll)))
+        ((scroll_end=list_total+1))
+
+    # If current dir is somewhere in the middle, center scroll position.
+    else
+        ((scroll_start=scroll-max_items/2))
+        ((scroll_end=scroll_start+max_items))
+        ((scroll_new_pos=max_items/2+1))
+    fi
+
+    # Reset cursor position.
+    printf '\e[H'
+
+    for ((i=scroll_start;i<scroll_end;i++)); {
+        # Don't print one too many newlines.
+        ((i > scroll_start)) &&
+            printf '\n'
+
+        print_line "$i"
+    }
+
+    # Move the cursor to its new position if it changed.
+    # If the variable 'scroll_new_pos' is empty, the cursor
+    # is moved to line '0'.
+    printf '\e[%sH' "$scroll_new_pos"
+    ((y=scroll_new_pos))
+}
+
+draw_img() {
+    # Draw an image file on the screen using w3m-img.
+    # We can use the framebuffer; set win_info_cmd as appropriate.
+    [[ $(tty) == /dev/tty[0-9]* && -w /dev/fb0 ]] &&
+        win_info_cmd=fbset
+
+    # X isn't running and we can't use the framebuffer, do nothing.
+    [[ -z $DISPLAY && $win_info_cmd != fbset ]] &&
+        return
+
+    # File isn't an image file, do nothing.
+    get_mime_type "${list[scroll]}"
+    [[ $mime_type != image/* ]] &&
+        return
+
+    # w3m-img isn't installed, do nothing.
+    type -p "$w3m" &>/dev/null || {
+        cmd_line "error: Couldn't find 'w3m-img', is it installed?"
+        return
+    }
+
+    # $win_info_cmd isn't installed, do nothing.
+    type -p "${win_info_cmd:=xdotool}" &>/dev/null || {
+        cmd_line "error: Couldn't find '$win_info_cmd', is it installed?"
+        return
+    }
+
+    # Get terminal window size in pixels and set it to WIDTH and HEIGHT.
+    if [[ $win_info_cmd == xdotool ]]; then
+        IFS=$'\n' read -d "" -ra win_info \
+            < <(xdotool getactivewindow getwindowgeometry --shell)
+
+        declare "${win_info[@]}" &>/dev/null || {
+            cmd_line "error: Failed to retrieve window size."
+            return
+        }
+    else
+        [[ $(fbset --show) =~ .*\"([0-9]+x[0-9]+)\".* ]]
+        IFS=x read -r WIDTH HEIGHT <<< "${BASH_REMATCH[1]}"
+    fi
+
+    # Get the image size in pixels.
+    read -r img_width img_height < <("$w3m" <<< "5;${list[scroll]}")
+
+    # Subtract the status_line area from the image size.
+    ((HEIGHT=HEIGHT-HEIGHT*5/LINES))
+
+    ((img_width > WIDTH)) && {
+        ((img_height=img_height*WIDTH/img_width))
+        ((img_width=WIDTH))
+    }
+
+    ((img_height > HEIGHT)) && {
+        ((img_width=img_width*HEIGHT/img_height))
+        ((img_height=HEIGHT))
+    }
+
+    clear_screen
+    status_line "${list[scroll]}"
+
+    # Add a small delay to fix issues in VTE terminals.
+    ((BASH_VERSINFO[0] > 3)) &&
+        read "${read_flags[@]}" -srn 1
+
+    # Display the image.
+    printf '0;1;%s;%s;%s;%s;;;;;%s\n3;\n4\n' \
+        "${FFF_W3M_XOFFSET:-0}" \
+        "${FFF_W3M_YOFFSET:-0}" \
+        "$img_width" \
+        "$img_height" \
+        "${list[scroll]}" | "$w3m" &>/dev/null
+
+    # Wait for user input.
+    read -ern 1
+
+    # Clear the image.
+    printf '6;%s;%s;%s;%s\n3;' \
+        "${FFF_W3M_XOFFSET:-0}" \
+        "${FFF_W3M_YOFFSET:-0}" \
+        "$WIDTH" \
+        "$HEIGHT" | "$w3m" &>/dev/null
+
+    redraw
+}
+
+redraw() {
+    # Redraw the current window.
+    # If 'full' is passed, re-fetch the directory list.
+    [[ $1 == full ]] && {
+        read_dir
+        scroll=0
+    }
+
+    clear_screen
+    draw_dir
+    status_line
+}
+
+mark() {
+    # Mark file for operation.
+    # If an item is marked in a second directory,
+    # clear the marked files.
+    [[ $PWD != "$mark_dir" ]] &&
+        marked_files=()
+
+    # Don't allow the user to mark the empty directory list item.
+    [[ ${list[0]} == empty && -z ${list[1]} ]] &&
+        return
+
+    if [[ $1 == all ]]; then
+        if ((${#marked_files[@]} != ${#list[@]})); then
+            marked_files=("${list[@]}")
+            mark_dir=$PWD
+        else
+            marked_files=()
+        fi
+
+        redraw
+    else
+        if [[ ${marked_files[$1]} == "${list[$1]}" ]]; then
+            unset 'marked_files[scroll]'
+
+        else
+            marked_files[$1]="${list[$1]}"
+            mark_dir=$PWD
+        fi
+
+        # Clear line before changing it.
+        printf '\e[K'
+        print_line "$1"
+    fi
+
+    # Find the program to use.
+    case "$2" in
+        ${FFF_KEY_YANK:=y}|${FFF_KEY_YANK_ALL:=Y}) file_program=(cp -iR${FFF_DEREFERENCE_SYMLINKS}) ;;
+        ${FFF_KEY_MOVE:=m}|${FFF_KEY_MOVE_ALL:=M}) file_program=(mv -i)  ;;
+        ${FFF_KEY_LINK:=s}|${FFF_KEY_LINK_ALL:=S}) file_program=(ln -s)  ;;
+
+        # These are 'fff' functions.
+        ${FFF_KEY_TRASH:=d}|${FFF_KEY_TRASH_ALL:=D})
+            file_program=(trash)
+        ;;
+
+        ${FFF_KEY_BULK_RENAME:=b}|${FFF_KEY_BULK_RENAME_ALL:=B})
+            file_program=(bulk_rename)
+        ;;
+    esac
+
+    status_line
+}
+
+trash() {
+    # FIXME: add option for trah confirmation - now no confirmation to trash, confirmation to empty trash
+    # Trash a file.
+    if [ "$PWD" != "$FFF_TRASH" ]; then
+		cmd_reply="y"
+    else
+		cmd_line "erase [${#marked_files[@]}] items? [y/n]: " y n
+    fi
+    [[ $cmd_reply != y ]] &&
+        return
+
+    if [[ $FFF_TRASH_CMD ]]; then
+        # Pass all but the last argument to the user's
+        # custom script. command is used to prevent this function
+        # from conflicting with commands named "trash".
+        command "$FFF_TRASH_CMD" "${@:1:$#-1}"
+
+    else
+        cd "$FFF_TRASH" || cmd_line "error: Can't cd to trash directory."
+
+        if cp -alf "$@" &>/dev/null; then
+            rm -r "${@:1:$#-1}"
+        else
+            mv -f "$@"
+        fi
+
+        # Go back to where we were.
+        cd "$OLDPWD" ||:
+    fi
+}
+
+bulk_rename() {
+    # Bulk rename files using '$EDITOR'.
+    rename_file=${XDG_CACHE_HOME:=${HOME}/.cache}/fff/bulk_rename
+    marked_files=("${@:1:$#-1}")
+
+    # Save marked files to a file and open them for editing.
+    printf '%s\n' "${marked_files[@]##*/}" > "$rename_file"
+    "${EDITOR:-vi}" "$rename_file"
+
+    # Read the renamed files to an array.
+    IFS=$'\n' read -d "" -ra changed_files < "$rename_file"
+
+    # If the user deleted a line, stop here.
+    ((${#marked_files[@]} != ${#changed_files[@]})) && {
+        rm "$rename_file"
+        cmd_line "error: Line mismatch in rename file. Doing nothing."
+        return
+    }
+
+    printf '%s\n%s\n' \
+        "# This file will be executed when the editor is closed." \
+        "# Clear the file to abort." > "$rename_file"
+
+    # Construct the rename commands.
+    for ((i=0;i<${#marked_files[@]};i++)); {
+        [[ ${marked_files[i]} != "${PWD}/${changed_files[i]}" ]] && {
+            printf 'mv -i -- %q %q\n' \
+                "${marked_files[i]}" "${PWD}/${changed_files[i]}"
+            local renamed=1
+        }
+    } >> "$rename_file"
+
+    # Let the user double-check the commands and execute them.
+    ((renamed == 1)) && {
+        "${EDITOR:-vi}" "$rename_file"
+
+        source "$rename_file"
+        rm "$rename_file"
+    }
+
+    # Fix terminal settings after '$EDITOR'.
+    setup_terminal
+}
+
+open() {
+    # Open directories and files.
+    if [[ -d $1/ ]]; then
+        search=
+        search_end_early=
+        hcd "${1:-/}" ||:
+        redraw full
+
+    elif [[ -f $1 ]]; then
+        # Figure out what kind of file we're working with.
+        get_mime_type "$1"
+
+        # Open all text-based files in '$EDITOR'.
+        # Everything else goes through 'xdg-open'/'open'.
+        case "$mime_type" in
+            text/*|*x-empty*|*json*)
+                # If 'fff' was opened as a file picker, save the opened
+                # file in a file called 'opened_file'.
+                ((file_picker == 1)) && {
+                    printf '%s\n' "$1" > \
+                        "${XDG_CACHE_HOME:=${HOME}/.cache}/fff/opened_file"
+                    exit
+                }
+
+                clear_screen
+                reset_terminal
+                "${VISUAL:-${EDITOR:-vi}}" "$1"
+                setup_terminal
+                redraw
+            ;;
+
+            *)
+                # 'nohup':  Make the process immune to hangups.
+                # '&':      Send it to the background.
+                # 'disown': Detach it from the shell.
+                nohup "${FFF_OPENER:-${opener:-xdg-open}}" "$1" &>/dev/null &
+                disown
+            ;;
+        esac
+    fi
+}
+
+cmd_line() {
+    # Write to the command_line (under status_line).
+    cmd_reply=
+
+    # '\e7':     Save cursor position.
+    # '\e[?25h': Unhide the cursor.
+    # '\e[%sH':  Move cursor to bottom (cmd_line).
+    printf '\e7\e[%sH\e[?25h' "$LINES"
+
+    # '\r\e[K': Redraw the read prompt on every keypress.
+    #           This is mimicking what happens normally.
+    sloop=1
+    while IFS= read -rsn 1 -p $'\r\e[K'"${1}${cmd_reply}" read_reply && [ $sloop -eq 1 ]; do
+        case $read_reply in
+            # Backspace.
+            $'\177'|$'\b')
+                cmd_reply=${cmd_reply%?}
+
+                # Clear tab-completion.
+                unset comp c
+            ;;
+
+            # Tab.
+            $'\t')
+                comp_glob="$cmd_reply*"
+
+                # Pass the argument dirs to limit completion to directories.
+                [[ $2 == dirs ]] &&
+                    comp_glob="$cmd_reply*/"
+
+                # Generate a completion list once.
+                [[ -z ${comp[0]} ]] &&
+                    IFS=$'\n' read -d "" -ra comp < <(compgen -G "$comp_glob")
+
+                # On each tab press, cycle through the completion list.
+                [[ -n ${comp[c]} ]] && {
+                    cmd_reply=${comp[c]}
+                    ((c=c >= ${#comp[@]}-1 ? 0 : ++c))
+                }
+            ;;
+
+            # Escape / Custom 'no' value (used as a replacement for '-n 1').
+            $'\e'|${3:-null})
+		# AGAG attempt to manage keydown as return 
+		original_code=0
+		if [ $original_code -eq 1 ]; then
+                	read "${read_flags[@]}" -rsn 2 
+                	cmd_reply=
+		else
+                	read "${read_flags[@]}" -rsn 2 kcode
+                	if [[ $2 == search ]]; then
+			   # if cursor up or cursor down do as return is pressed (finish search and keep results)
+                           if [ "$kcode" = '[B' ] ||  [ "$kcode" = '\eOB' ] ||    # down arrow
+                           [ "$kcode" = '[C' ] ||  [ "$kcode" = '\eOC' ] || 	  # up arrow
+                           [ "$kcode" = '[A' ] ||  [ "$kcode" = '\eOA' ]; then    # left arrow
+    				printf '\e[2K\e[?25l\e8'
+            			printf '\e[%sH\e[?25h' "$LINES"
+                    		unset comp c
+				sloop=0
+				search=
+			   else 
+			   	# any other ESCAPE resets the search
+				cmd_reply=
+			   fi
+			else
+			   	# any other ESCAPE resets the search
+                		cmd_reply=
+			fi
+		fi
+                break
+            ;;
+
+            # Enter/Return.
+            "")
+                # If there's only one search result and its a directory,
+                # enter it on one enter keypress.
+                if [[ $2 == search && "$cmd_reply" == "" ]]; then 
+	    		file_search_filter=
+		fi	
+                [[ $2 == search && -d ${list[0]} ]] && ((list_total == 0)) && {
+                    # '\e[?25l': Hide the cursor.
+                    printf '\e[?25l'
+
+                    open "${list[0]}"
+                    search_end_early=1
+
+                    # Unset tab completion variables since we're done.
+                    unset comp c
+                    return
+                }
+
+                break
+            ;;
+
+            # Custom 'yes' value (used as a replacement for '-n 1').
+            ${2:-null})
+                cmd_reply=$read_reply
+                break
+            ;;
+
+            # Replace '~' with '$HOME'.
+            "~")
+                cmd_reply+=$HOME
+            ;;
+
+            # Anything else, add it to read reply.
+            *)
+                cmd_reply+=$read_reply
+
+                # Clear tab-completion.
+                unset comp c
+            ;;
+        esac
+
+        # Search on keypress if search passed as an argument.
+        [[ $2 == search ]] && {
+            # '\e[?25l': Hide the cursor.
+            printf '\e[?25l'
+
+	    if [[ "${FFF_SORT_ORDER}" != "" ]]; then
+    	         if [[ "${FFF_SORT_ORDER}" == "g" ]]; then
+			list=($(lsd |  awk -vsearchst="$cmd_reply" -vprefix="$PWD" -vIGNORECASE=1 -vheader="----------------"    '{ if (!searchst) exit ;tail=$NF ;  if (tail && ( tail != prevtail)) {  header_to_print=header tail header " ";  prevtail=tail } ; n=split($0,f,"/");  l=$0; sub(" " tail ,"",l) ;   gsub(" ","§",l); if (index(f[n],searchst)) {if (header_to_print) { print header_to_print; header_to_print=""} ; print l " "   }}'))
+	         else
+			 list=($(ls -a${FFF_SORT_ORDER}  "$PWD" | awk -vsearchst="$cmd_reply" -vprefix="$PWD" -vIGNORECASE=1 'BEGIN  { gsub(" ","%",prefix) } { if (($1==".") || ($1=="..")) next; if (searchst && !index($0,searchst)) next ; fname=$0; gsub(" ","§",fname); printf "%s/%s \n",prefix,fname}'))
+                 fi
+		# FIXME: is there a better way to perform array replacement? use cached values
+		for((i=0; i < "${#list[@]}"; i++))
+		do
+			list[i]=${list[i]//§/ }
+		done
+	    else
+		if [[ "$PWD" == "$FFF_HIST_DIR" ]]; then
+                	# Special management of hist dir by creation folder
+			list=($(ls -lt -t  "$PWD" | awk -vsearchst="$cmd_reply" -vprefix="$PWD" -vIGNORECASE=1 'BEGIN { gsub(" ","§",prefix)} { if (($1==".") || ($1=="..")) next; if (searchst && !index($0,searchst)) next ; fname=$0; gsub(" ","§",fname); printf "%s/%s \n",prefix,fname}'))
+		else
+                	# Use a greedy glob to search.
+                	list=("$PWD"/*"$cmd_reply"*)
+		fi
+	    fi
+            ((list_total=${#list[@]}-1))
+
+	    file_search_filter=$cmd_reply
+
+            # Draw the search results on screen.
+            scroll=0
+            redraw
+
+            # '\e[%sH':  Move cursor back to cmd-line.
+            # '\e[?25h': Unhide the cursor.
+            printf '\e[%sH\e[?25h' "$LINES"
+        }
+    done
+
+    # redraw if input from search is null
+    if [[ $2 == search ]] && [[ "$cmd_reply" == "" ]] ; then
+	   	redraw full
+    fi
+    # Unset tab completion variables since we're done.
+    unset comp c
+
+    # '\e[2K':   Clear the entire cmd_line on finish.
+    # '\e[?25l': Hide the cursor.
+    # '\e8':     Restore cursor position.
+    printf '\e[2K\e[?25l\e8'
+}
+
+# prompts input strings, wait for a char and put it in cmd_reply
+wait_input_char_with_msg() {
+    # '\e7':     Save cursor position.
+    # '\e[?25h': Unhide the cursor.
+    # '\e[%sH':  Move cursor to bottom (cmd_line).
+    printf '\e7\e[%sH\e[?25h' "$LINES"
+    printf "%s" "$*"
+    # setting IFS this way allows to read special chars like TAB, RETURN etc - IFS is automatically reset after ther read
+    saveIFS=$IFS
+    IFS=
+#    read -s -n 1 cmd_reply
+    read -s -n 1 cmd_reply
+    # '\e[2K':   Clear the entire cmd_line on finish.
+    # '\e[?25l': Hide the cursor.
+    # '\e8':     Restore cursor position.
+    IFS="$saveIFS"
+    printf '\e[2K\e[?25l\e8'
+}
+
+# notify a message for FFF_NOTIFY_DELAY seconds or for a number of seconds specified by "-d sec" as first arguments
+notify() {
+    # '\e7':     Save cursor position.
+    # '\e[?25h': Unhide the cursor.
+    # '\e[%sH':  Move cursor to bottom (cmd_line).
+    if [[ "$1" == "-d" ]]; then
+	ndelay="$2"
+	shift; shift
+    else
+    	ndelay=${FFF_NOTIFY_DELAY:=1}
+    fi
+    printf '\e7\e[%sH\e[?25h' "$LINES"
+    printf "%s" "$*"
+    sleep ${ndelay}
+    # '\e[2K':   Clear the entire cmd_line on finish.
+    # '\e[?25l': Hide the cursor.
+    # '\e8':     Restore cursor position.
+    printf '\e[2K\e[?25l\e8'
+}
+
+save_tabs() {
+	cd "${FFF_SAVED_TABS_DIR}"
+	cmd_line "tabs file name?: "
+	cd - > /dev/null
+	if [[ "$cmd_reply" != ""  ]]; then
+		tabs_dir=$(dirname "$cmd_reply")
+		if [[ "$tabs_dir" != . ]] && [[ -d "$tabs_dir" ]]; then
+			# absolute path to existing dir
+			computed_tabs_dir="$tabs_dir"
+			tabsfile="${cmd_reply}"
+		else
+			# relative path to existing dir
+			computed_tabs_dir="$FFF_SAVED_TABS_DIR"
+			tabsfile="${computed_tabs_dir}/${cmd_reply}"
+		fi
+		if [[ -d "$computed_tabs_dir" ]]; then
+			echo "declare -A saved_TABS_LOCATION" > $tabsfile
+			for tab in $FFF_TABS; do
+				if [ $tab != main ]; then
+					echo "saved_TABS_LOCATION[$tab]=\"${TABS_LOCATION[$tab]}\"" >> $tabsfile
+				fi
+			done
+		fi
+	fi
+	notify "Saved $cmd_reply"
+}
+
+load_tabs() {
+	cd "${FFF_SAVED_TABS_DIR}"
+	cmd_line "tabs file name?: "
+	cd - > /dev/null
+	if [[ "$cmd_reply" != ""  ]]; then
+		if [[ -e  "$cmd_reply"  ]] ; then
+			# absolute path
+			tabsfile="${cmd_reply}"
+		else
+			# relative path
+			tabsfile="${FFF_SAVED_TABS_DIR}/${cmd_reply}"
+		fi
+		if [[ -e  "$tabsfile"  ]] ; then
+			# merges the tabs
+			. $tabsfile
+			for tab in "${!saved_TABS_LOCATION[@]}"
+				do
+					if [[ ${TABS_LOCATION[$tab]} == "" ]]; then
+					    TABS_LOCATION[$tab]="${saved_TABS_LOCATION[$tab]}"
+					    FFF_TABS="$FFF_TABS $tab"
+					else
+					    notify "Tab $tab is already present - skipped"
+					fi
+			done
+			unset saved_TAB_LOCATIONS
+		else
+				cmd_line "Tabs file $cmd_reply not found."
+		fi
+	fi
+}
+
+new_tab() {
+	cmd_line "new tab name? "
+	if [ "$cmd_reply" != "" ]; then
+		# FIXME add check of size and existence
+		FFF_TABS="$FFF_TABS $cmd_reply"
+		CURRENT_TAB=$cmd_reply
+		TABS_LOCATION[$CURRENT_TAB]="$PWD"
+		notify "added new tab $cmd_reply"
+	fi
+	restore_title
+}
+close_tab() {
+	if [ $CURRENT_TAB == main ]; then
+		notify "Cannot close main tab"
+	else
+		thistab=$CURRENT_TAB
+		switch_to_tab main
+		ttab=""
+		for tab in $FFF_TABS ; do
+			if [ $tab != $thistab ]; then
+				ttab="$ttab $tab"
+			fi
+		done
+		FFF_TABS="$ttab"
+		unset TABS_LOCATION[$thistab]
+	fi
+}
+
+autoswitch_sort_order() {
+	   case $FFF_SORT_ORDER in
+		   "") FFF_SORT_ORDER="t"
+		       sort_order_st="Modified time (older last)"
+		       ;;
+		   "t") FFF_SORT_ORDER="rt"
+			sort_order_st="Modified time (older first)"
+		       ;;
+		   "rt") 
+			FFF_SORT_ORDER="g"
+			case $group_by in
+			"d")
+				group_by_str="by day"
+				;;
+			"m")
+				group_by_str="by month"
+				;;
+			"y")
+				group_by_str="by year"
+				;;
+			"w")
+				group_by_str="by week"
+				;;
+			"*")
+				group_by_str="unknown"
+				;;
+			esac
+			sort_order_st="Grouped $group_by_str (older last)"
+			;;
+		   "g") FFF_SORT_ORDER="S"
+			 sort_order_st="Grouped by Size"
+		       ;;
+		   "S") FFF_SORT_ORDER=""
+			 sort_order_st="Alphabetical"
+		       ;;
+		   *)	   FFF_SORT_ORDER=""
+			   sort_order_st="Alphabetical"
+			   ;;
+	   esac
+	   notify "Sort order is now: $sort_order_st"
+	   redraw full
+}
+
+verbose_show_file_list() {
+	clear
+        for item in $filelist; do
+		item=${item//§/ }
+		is_header=$(echo $item | awk '{ if (substr($1,1,10)=="----------") print "yes"}')
+		if [ "$is_header" != yes ]; then
+			ls -la "$item" | awk '{ line=$1; for (i=2;i<=8;i++) line=line " " $i ; n=split($9,p,"/") ; if (n>1) { name=p[n]  } else name=$9 ; for (i=10;i<=NF;i++) name=name " " $i; print line " " name }'
+		fi
+	done | $PAGER
+	redraw 
+}
+
+set_sort_order() {
+	   clear_screen
+	   case $FFF_SORT_ORDER in
+		   "") sort_order_st="Alphabetical"
+			   ;;
+		   "t") sort_order_st="Modified time (older last)"
+			   ;;
+		   "rt") sort_order_st="Modified time (older first)"
+			   ;;
+		   "g") 
+			case $group_by in
+			"d")
+				group_by_str="by day"
+				;;
+			"m")
+				group_by_str="by month"
+				;;
+			"y")
+				group_by_str="by year"
+				;;
+			"w")
+				group_by_str="by week"
+				;;
+			"*")
+				group_by_str="unknown"
+				;;
+			esac
+			sort_order_st="Grouped $group_by_str (older last)"
+			;;
+		   "S") sort_order_st="File Size"
+			   ;;
+		   *) sort_order_st="unknown ($FFF_SORT_ORDER)"
+			   ;;
+	   esac
+	   echo "--------- Current sort order: $sort_order_st"
+	   wait_input_char_with_msg "sort order (a=alphabetical, t=modified time (older last), r=reverse modified time, s=file size, g/G=grouped: "
+	   okparm=0
+	   if [[ "$cmd_reply" == "a" ]]; then
+		FFF_SORT_ORDER=""
+		sort_order_st="Alphabetical"
+		okparm=1
+	   fi
+	   if [[ "$cmd_reply" == "G" ]]; then
+		FFF_SORT_ORDER="g"
+	   	wait_input_char_with_msg "group by (d=day, m=month, y=year, w=week): "
+		case "$cmd_reply" in
+			"d")
+				group_by_str="by day"
+				group_by="d"
+		       		sort_order_st="Modified time (older last)"
+				;;
+			"m")
+				group_by_str="by month"
+				group_by="m"
+				;;
+			"y")
+				group_by_str="by year"
+				group_by="y"
+				;;
+			"w")
+				group_by_str="by week"
+				group_by="w"
+				;;
+			"*")
+				notify "Invalid char - keeping $grop_by_str"
+				group_by_str="d"
+				group_by_str="by day"
+				;;
+			esac
+		FFF_SORT_ORDER="g"
+		sort_order_st="Grouped $group_by_str (older last)"
+		status_line "Sorting files in groups $sort_order_st (wait max $FFF_TIMEOUT seconds)..."
+		okparm=1
+	   fi
+	   if [[ "$cmd_reply" == "g" ]]; then
+		FFF_SORT_ORDER="g"
+		sort_order_st="Grouped $group_by_str (older last)"
+		status_line "Sorting files in groups $sort_order_st (wait max $FFF_TIMEOUT seconds)..."
+		okparm=1
+	   fi
+	   if [[ "$cmd_reply" == "t" ]]; then
+		FFF_SORT_ORDER="t"
+		sort_order_st="Modified time (older last)"
+		okparm=1
+	   fi
+	   if [[ "$cmd_reply" == "r" ]]; then
+		FFF_SORT_ORDER="rt"
+		sort_order_st="Modified time (older last)"
+		okparm=1
+	   fi
+	   if [[ "$cmd_reply" == "s" ]]; then
+		FFF_SORT_ORDER="S"
+		sort_order_st="File Size"
+		okparm=1
+	   fi
+	   if [ $okparm -ne 1 ] && [ "$cmd_reply" != "" ]; then
+		   notify "Invalid sort order {$cmd_reply}"
+           fi
+	   notify "Sort order is now: $sort_order_st"
+	   redraw full
+}
+bookmarks_menu() {
+	   clear_screen
+	   echo "--------- List of Bookmarks:"
+	   echo ""
+	   for bn in 1 2 3 4 5 6 7 8 9 ; do
+		favourite="FFF_FAV${bn}"
+		echo "   $bn -> ${!favourite}"
+	   done
+	   wait_input_char_with_msg "jump to bookmark [1-9] , a to set , s to save , l to load: "
+	   # goto bookmark
+	   if [[ "$cmd_reply" == [1-9] ]]; then
+		favourite="FFF_FAV${cmd_reply}"
+		favourite="${!favourite}"
+		[[ $favourite ]] &&
+			 open "$favourite"
+	   fi
+	   # set bookmark
+	   if [[ "$cmd_reply" == "a" ]]; then
+	     wait_input_char_with_msg "bookmark number to set [1-9]: "
+	     if [[ "$cmd_reply" == [1-9] ]]; then
+		   favourite="FFF_FAV${cmd_reply}"
+		   eval export $favourite=\"$PWD\"
+	     fi
+	   fi
+	   # save bookmark list
+	   if [[ "$cmd_reply" == "s" ]]; then
+		cd "$FFF_BOOKMARKS_DIR"
+		cmd_line "bookmarks file name?: "
+		cd - > /dev/null
+                if [[ "$cmd_reply" != ""  ]]; then
+			if [[ -d "$FFF_BOOKMARKS_DIR" ]]; then
+				cat << EOTT > "${FFF_BOOKMARKS_DIR}/$cmd_reply"
+# Bookmark list for fff
+export FFF_FAV1="$FFF_FAV1"
+export FFF_FAV2="$FFF_FAV2"
+export FFF_FAV3="$FFF_FAV3"
+export FFF_FAV4="$FFF_FAV4"
+export FFF_FAV5="$FFF_FAV5"
+export FFF_FAV6="$FFF_FAV6"
+export FFF_FAV7="$FFF_FAV7"
+export FFF_FAV8="$FFF_FAV8"
+export FFF_FAV9="$FFF_FAV9"
+EOTT
+				if [ $? -ne 0 ]; then
+					cmd_line "warn: Error saving file $cmd_reply"
+				else
+					notify "Bookmarks file $cmd_reply saved."
+				fi
+			else
+				cmd_line "warn: Missing directory $FFF_BOOKMARKS_DIR for file $cmd_reply"
+			fi
+                fi
+           fi
+	   # load bookmark list
+	   if [[ "$cmd_reply" == "l" ]]; then
+		cd "$FFF_BOOKMARKS_DIR"
+		cmd_line "bookmarks file name?: "
+		cd - > /dev/null
+                if [[ "$cmd_reply"  ]]; then
+		    if [[ -e "$cmd_reply" ]]; then
+			    # absolute name
+			    bookmarksfile="$cmd_reply"
+		    else
+			    # relative name
+			    bookmarksfile="$FFF_BOOKMARKS_DIR/$cmd_reply"
+		    fi
+		    if [[ -e "$bookmarksfile" ]]; then
+			. "$bookmarksfile"
+			if [ $? -ne 0 ]; then
+				cmd_line "warn: Error loading file $cmd_reply"
+			else
+				notify "Bookmarks file $cmd_reply loaded."
+			fi
+		    else
+				cmd_line "Bookmarks file $cmd_reply not found."
+		    fi
+		fi
+           fi
+	   redraw full
+}
+
+get_next_tab() {
+	   next_tab=""
+	   pick_next=0
+	   for tab in $FFF_TABS; do
+		 if [ $pick_next -eq 1 ]; then
+			 next_tab=$tab
+			 pick_next=0
+		 fi
+		 if [ "$next_tab" == "" ] && [ $CURRENT_TAB == $tab ]; then
+			pick_next=1
+		 fi
+	   done
+	   echo $next_tab
+}
+
+tabs_menu() {
+	   clear_screen
+	   echo "--------- List of Tabs:"
+	   echo ""
+	   tabnum=1
+	   declare -a tablist
+	   for tab in $FFF_TABS; do
+		   if [[ $tab == $CURRENT_TAB ]]; then
+			   currst="*"
+			   TABS_LOCATION[$CURRENT_TAB]="$PWD"
+		   else
+			   currst=""
+		   fi
+		   echo "   $tabnum $currst	$tab		${TABS_LOCATION[$tab]}"
+		   tablist[$tabnum]=$tab
+		   tabnum=$((tabnum + 1 ))
+	   done
+	   wait_input_char_with_msg "[1-9] or TAB to switch , c to close current, n to create new, s/l to save/load, RETURN to continue "
+	   if [[ "$cmd_reply" == [1-9] ]]; then
+		   target_tab=${tablist[$cmd_reply]}
+		   if [ "$target_tab" != "" ]; then
+			switch_to_tab $target_tab
+		   else
+			notify "Invalid tab number"
+		   fi
+	   elif [[ "$cmd_reply" == $'\t' ]]; then
+		   next_t=$(get_next_tab)
+		   if [ "$next_t" = "" ]; then
+			   next_t="main"
+		   fi
+		   switch_to_tab $next_t
+	   elif [[ "$cmd_reply" == "c" ]]; then
+		   close_tab
+	   elif [[ "$cmd_reply" == "n" ]]; then
+		   new_tab
+	   elif [[ "$cmd_reply" == "s" ]]; then
+		   save_tabs
+	   elif [[ "$cmd_reply" == "l" ]]; then
+		   load_tabs
+#	   else
+#		cmd_line "Unrecognized option $cmd_reply - Type RETURN to continue"
+	   fi
+	   unset tablist
+	   redraw full
+}
+
+# first argument is the target tab name
+switch_to_tab() {
+	if [ $# -eq 0  ]; then
+		cmd_line "no args to switch to tab."
+		return
+	fi
+	target_tab=$1
+	notify "switching to $target_tab"
+	# switch to target_tab
+	if [ -d "${TABS_LOCATION[$target_tab]}" ]; then
+		savedir="$PWD"
+		cd "${TABS_LOCATION[$target_tab]}" 2> /dev/null
+		if [ $? -eq 0 ]; then
+			# saves tab position of tab we're leaving and move pointer to next tab
+			TABS_LOCATION[${CURRENT_TAB}]="$savedir"
+			CURRENT_TAB=$target_tab
+			TABS_LOCATION[${CURRENT_TAB}]="$PWD"
+		else
+			cmd_line "warn: cannot chdir to ${TABS_LOCATION[$target_tab]}"
+		fi
+	else
+			cmd_line "warn: ${TABS_LOCATION[$target_tab]} does not exist. Re-setting tab location for ${target_tab}"
+			TABS_LOCATION[$CURRENT_TAB]="$PWD"
+			CURRENT_TAB=$target_tab
+			TABS_LOCATION[$CURRENT_TAB]="$PWD"
+			notify "now in tab ${TABS_LOCATION[$target_tab]}"
+	fi
+	restore_title
+}
+
+# set the filter for file size
+set_file_size_filter() {
+	   cmd_line "Minimum file size to show in bytes (0=only zero/1=non zero/-1=all/n) "
+	   if [ "$cmd_reply" != "" ]; then
+		# FIXME: validate data
+		FFF_FILE_SIZE_THRESHOLD=$cmd_reply
+	   	notify -d 2 "FILE_SIZE_THRESHOLD is now $cmd_reply"
+        	redraw full
+	   fi
+}
+# dump settings to file
+dump_settings() {
+	if [ $# -eq 0 ]; then
+	   	notify -d 2 "Internal error: dump_settings without args"
+		return
+	fi
+	outfile="$1"
+	rm -f "$outfile" 2> /dev/null
+	cat << EOTT > "$outfile"
+FFF_HOME="$FFF_HOME"
+FFF_BOOKMARKS_DIR="$FFF_BOOKMARKS_DIR"
+FFF_SAVED_TABS_DIR="$FFF_SAVED_TABS_DIR"
+FFF_SCRATCHPAD_DIR="$FFF_SCRATCHPAD_DIR"
+FFF_HIST_DIR="$FFF_HIST_DIR"
+FFF_MENU_DIR="$FFF_MENU_DIR"
+# maximum number of lines shown by in find/filter commands used by "group by"
+FFF_MAXLINES=$FFF_MAXLINES
+# max directory depth used by find/filter commands used by "group by"
+FFF_MAXDEPTH=$FFF_MAXDEPTH
+# max time in seconds to look for file by find/filter commands used by "group by"
+FFF_TIMEOUT=$FFF_TIMEOUT
+# 0 to show 0 size files, 1 to show files with non zero size, -1 to show all files, value > 1 to show minimum file size to show
+FFF_FILE_SIZE_THRESHOLD=$FFF_FILE_SIZE_THRESHOLD
+# set to "-mount" to avoid mount path navigation 
+FFF_DO_NOT_TRAVERSE_MOUNTS=$FFF_DO_NOT_TRAVERSE_MOUNTS
+EOTT
+}
+
+# show/change settings
+settings_page() {
+    	   current_settings_file=${XDG_CACHE_HOME:=${HOME}/.cache}/fff/current_settings
+	   wait_input_char_with_msg "v to view settings, c to edit and apply to current session, p to edit and apply permanently, RETURN to continue "
+	   if [[ "$cmd_reply" == v ]]; then
+	        dump_settings "$current_settings_file"
+            	reset_terminal
+		"${PAGER:-less}" "${current_settings_file}"
+                setup_terminal
+                redraw
+	   elif [[ "$cmd_reply" == "c" ]]; then
+	        dump_settings "$current_settings_file"
+            	reset_terminal
+		"${EDITOR:-vi}" "${current_settings_file}"
+		chmod 755 "${current_settings_file}"
+		echo "press any key to continue (x to avoid loading the configuration)" ; read myans
+		if [ "$myans" != "x" ]; then
+			. "${current_settings_file}"
+		fi
+                setup_terminal
+                redraw
+	   elif [[ "$cmd_reply" == "p" ]]; then
+	   	notify -d 2 "not implemented"
+	   fi
+}
+	
+
+# compute menu from arg
+# menus are files stored under $FFF_MENU_DIR directory
+# to open menus, the menu named "main" shall be present.
+# menus are shell files that can contain functions, can display info etc
+# the voices of the menu are defined as 
+# menu["STRING_TO_SHOW"]="COMMANDS_TO_RUN"
+# COMMANDS_TO_RUN is the list of ; separated commands to run
+# Pipes or redirections are admitted 
+# The special word MENU followed by a menuname can be used to specify submenus
+# submenus can be re-used from many upper level menus
+# These special variables can be used within the commands:
+# FFF : the name of the FFF executable
+# FFF_CURRENT_ENTRY : the entry under the cursor of FFF
+# FFF_MARKED_FILES : filename of list of marked files
+# FFF_PWD : the current dir of FFF
+# Note: submenus may contain quoted or unquoted chars to design variablees, main MUST contain quoted like \$VARNAME
+user_menu() {
+		the_MENU="$1"
+		the_MENU_name=$(basename "$the_MENU")
+		if [ ! -e "$the_MENU" ]; then
+	   		notify -d 2 "Cannot find menu $the_MENU"
+			return
+		fi
+		clear
+
+		# Save marked files to a file and open them for editing.
+		ts=$(date +"%s")
+		tmpmenu=${XDG_CACHE_HOME:=${HOME}/.cache}/fff/fffmenu_${the_MENU_name}.$$.${ts}.sh
+		marked_files_list=${XDG_CACHE_HOME:=${HOME}/.cache}/fff/fff_marked-files.$$.${ts}.txt
+		printf '%s\n' "${marked_files[@]##*/}" > "$marked_files_list"
+		echo "declare -A menu" > $tmpmenu
+		echo "declare -a menu_entries" >> $tmpmenu
+cat << EOFU >> $tmpmenu
+function add_menu() {
+	key="\$1"	
+	shift
+	values="\$*"
+	menu["\$key"]="\$values"
+	menu_entries+=("\$key")
+}
+EOFU
+		cat "$the_MENU" >> $tmpmenu
+		tab1=$(echo $FFF_TABS | awk '{print $1}')
+		tab2=$(echo $FFF_TABS | awk '{print $2}')
+		if [ "$the_MENU_name" = "main" ]; then
+			export FFF_tab1="${TABS_LOCATION[$tab1]}"
+			if [ "$tab2" != "" ]; then
+				export FFF_tab2="${TABS_LOCATION[$tab2]}"
+			else
+				export FFF_tab2=""
+			fi
+		fi
+		cat << EOS >> $tmpmenu
+doloop=1
+cancel_str="Cancel"
+if [ "$the_MENU_name" = "main" ]; then
+		up_str=""
+		export FFF_HOME="$FFF_HOME"
+		export FFF_HIST_DIR="${FFF_HIST_DIR}"
+		export FFF_CURRENT_ENTRY="${list[scroll]}"
+		export FFF_PWD="$PWD"
+		export FFF_MARKED_FILES="$marked_files_list"
+		export FFF_TABS="$FFF_TABS"
+		export FFF_MENUTITLE
+		export FFF_tab1="$FFF_tab1"
+		export FFF_tab2="$FFF_tab2"
+	else
+		up_str="Up"
+		# FIXME: cancel from submenu is not implemented
+		cancel_str=""
+fi
+
+while [ \$doloop -eq 1 ]; do
+   echo ""
+   echo "\$FFF_MENUTITLE"
+   echo ""
+
+   select  key in \$up_str \$cancel_str  "\${menu_entries[@]}" ; do 
+		#echo Selezionato $key; echo Command ${menu["$key"]}
+		if [ "\$key" != "\$cancel_str" ] && [ "\$key" != "\$up_str" ] && [ "\$REPLY" != q ] && [ "\$REPLY" != "" ]; then
+			cmd=\$(echo \${menu["\$key"]} | awk '{print \$1}')
+			if [ "\$cmd" = "MENU" ]; then
+				# this is a submenu
+				menuname=\$(echo "\${menu["\$key"]}" | awk '{print \$2}')
+				\$FFF -m \$menuname
+			else
+				if [ "\$the_MENU_name" = main ]; then
+					doloop=0
+				fi
+	        		eval \${menu["\$key"]} 
+			fi
+		else
+			doloop=0
+			clear
+		fi
+		break
+   done
+done
+EOS
+		bash $tmpmenu
+		rm "$tmpmenu" "$marked_files_list"
+}
+
+key() {
+    # Handle special key presses.
+    [[ $1 == $'\e' ]] && {
+        read "${read_flags[@]}" -rsn 2
+
+        # Handle a normal escape key press.
+        [[ ${1}${REPLY} == $'\e\e['* ]] &&
+            read "${read_flags[@]}" -rsn 1 _
+
+        local special_key=${1}${REPLY}
+    }
+
+    case ${special_key:-$1} in
+        # Open list item.
+        # 'C' is what bash sees when the right arrow is pressed
+        # ('\e[C' or '\eOC').
+        # '' is what bash sees when the enter/return key is pressed.
+        ${FFF_KEY_CHILD1:=l}|\
+        ${FFF_KEY_CHILD2:=$'\e[C'}|\
+        ${FFF_KEY_CHILD3:=""}|\
+        ${FFF_KEY_CHILD4:=$'\eOC'})
+            open "${list[scroll]}"
+        ;;
+
+        # Go to the parent directory.
+        # 'D' is what bash sees when the left arrow is pressed
+        # ('\e[D' or '\eOD').
+        # '\177' and '\b' are what bash sometimes sees when the backspace
+        # key is pressed.
+        ${FFF_KEY_PARENT1:=h}|\
+        ${FFF_KEY_PARENT2:=$'\e[D'}|\
+        ${FFF_KEY_PARENT3:=$'\177'}|\
+        ${FFF_KEY_PARENT4:=$'\b'}|\
+        ${FFF_KEY_PARENT5:=$'\eOD'})
+            # If a search was done, clear the results and open the current dir.
+            if ((search == 1 && search_end_early != 1)); then
+                open "$PWD"
+
+            # If '$PWD' is '/', do nothing.
+            elif [[ $PWD && $PWD != / ]]; then
+                find_previous=1
+                open "${PWD%/*}"
+            fi
+        ;;
+
+        # Scroll down.
+        # 'B' is what bash sees when the down arrow is pressed
+        # ('\e[B' or '\eOB').
+        ${FFF_KEY_SCROLL_DOWN1:=j}|\
+        ${FFF_KEY_SCROLL_DOWN2:=$'\e[B'}|\
+        ${FFF_KEY_SCROLL_DOWN3:=$'\eOB'})
+            ((scroll < list_total)) && {
+                ((scroll++))
+                ((y < max_items)) && ((y++))
+
+                print_line "$((scroll-1))"
+                printf '\n'
+                print_line "$scroll"
+                status_line
+            }
+        ;;
+
+	## ScrollPage Down
+# knp=\E[6~, kpp=\E[5~
+# codes got from infocmp | less
+# see terminfo 5 and look for knp and kpp
+	${FFF_KEY_SCROLL_PGDOWN1:=J})
+#	${FFF_KEY_SCROLL_PGDOWN1:=J}|\
+#        ${FFF_KEY_SCROLL_PGDOWN2:=$'\e[6~'}|\
+#        ${FFF_KEY_SCROLL_PGDOWN3:=$'\eO6~'})
+	ct=$(($LINES-3));
+	while [ $ct -gt 0 ]; do
+            ((scroll < list_total)) && {
+                ((scroll++))
+                ((y < max_items)) && ((y++))
+
+                print_line "$((scroll-1))"
+                printf '\n'
+                print_line "$scroll"
+                status_line
+            }
+	    ct=$(($ct - 1 ))
+        done
+        ;;
+
+	## ScrollPage Up
+	${FFF_KEY_SCROLL_PGUP1:=K})
+	ct=$(($LINES-3));
+	while [ $ct -gt 0 ]; do
+            ((scroll > 0)) && {
+                ((scroll--))
+
+                print_line "$((scroll+1))"
+
+                if ((y < 2)); then
+                    printf '\e[L'
+                else
+                    printf '\e[A'
+                    ((y--))
+                fi
+
+                print_line "$scroll"
+                status_line
+            }
+	    ct=$(($ct - 1 ))
+        done
+        ;;
+
+        # Scroll up.
+        # 'A' is what bash sees when the up arrow is pressed
+        # ('\e[A' or '\eOA').
+        ${FFF_KEY_SCROLL_UP1:=k}|\
+        ${FFF_KEY_SCROLL_UP2:=$'\e[A'}|\
+        ${FFF_KEY_SCROLL_UP3:=$'\eOA'})
+            # '\e[1L': Insert a line above the cursor.
+            # '\e[A':  Move cursor up a line.
+            ((scroll > 0)) && {
+                ((scroll--))
+
+                print_line "$((scroll+1))"
+
+                if ((y < 2)); then
+                    printf '\e[L'
+                else
+                    printf '\e[A'
+                    ((y--))
+                fi
+
+                print_line "$scroll"
+                status_line
+            }
+        ;;
+
+        # Go to top.
+        ${FFF_KEY_TO_TOP1:=$'\e[H'}|\
+        ${FFF_KEY_TO_TOP:=g})
+
+            ((scroll != 0)) && {
+                scroll=0
+                redraw
+            }
+        ;;
+
+        # Go to bottom.
+        ${FFF_KEY_TO_BOTTOM1:=$'\e[F'}|\
+        ${FFF_KEY_TO_BOTTOM:=G})
+            ((scroll != list_total)) && {
+                ((scroll=list_total))
+                redraw
+            }
+        ;;
+
+        # Show hidden files.
+        ${FFF_KEY_HIDDEN:=.})
+            # 'a=a>0?0:++a': Toggle between both values of 'shopt_flags'.
+            #                This also works for '3' or more values with
+            #                some modification.
+            shopt_flags=(u s)
+            shopt -"${shopt_flags[((a=${a:=$FFF_HIDDEN}>0?0:++a))]}" dotglob
+            redraw full
+        ;;
+
+        # Search.
+        ${FFF_KEY_SEARCH:=/})
+            cmd_line "/" "search"
+
+            # If the search came up empty, redraw the current dir.
+            if [[ -z ${list[*]} ]]; then
+                list=("${cur_list[@]}")
+                ((list_total=${#list[@]}-1))
+                redraw
+                search=
+            else
+                search=1
+            fi
+        ;;
+
+        # Search to ScratchPad.
+        ${FFF_KEY_SEARCH_TO_SCRATCHPAD:=F})
+		cmd_line "string to search?: "
+		search_to_scratchpad $PWD $cmd_reply
+        ;;
+
+        # Spawn a shell.
+        ${FFF_KEY_SHELL:=!})
+            reset_terminal
+
+            # Make fff aware of how many times it is nested.
+            export FFF_LEVEL
+            ((FFF_LEVEL++))
+		
+	    cd "$PWD"
+	    bg="\e[47m"
+	    curdir=$(pwd)
+	    cbase=$(basename "$curdir")
+	    if [ "$FFF_MULTIPLEXER" != "" ]; then
+	    	wname="sh:$CURRENT_TAB:$cbase"
+	    else
+		wname="fff:$CURRENT_TAB"
+	    fi
+	    if [ "$myshell" = bash ]; then
+	    	myprompt="\n\[\e]0;\u@\h: \w\a\]\033[1;35m\][fff($FFF_LEVEL)]\033[00m\]-\[\033[1;31m\]\u@\h\[\033[00m\]:\[\033[;94m\]\[\033[01m\]$bg\w\[\033[00m\]\n[$wname]\$ "
+	    else
+		if [ $(whoami) != root ]; then
+			pchar='$'
+		else
+			pchar="#"
+		fi
+	    	myprompt="[$wname]$pchar "
+	    fi
+	    if [ "$FFF_MULTIPLEXER" != "" ]; then
+		 export CURRENT_TAB
+	   	 tmux new-window -t "$FFF_SESSION_NAME" -n "$wname" RUNSHELL
+	    else
+	     	 export FFF_PS1="$myprompt"
+	   	 PS1="$myprompt" $SHELL $SHELL_OPTS
+	    fi
+            ((FFF_LEVEL--))
+
+            setup_terminal
+            redraw 
+        ;;
+
+        # Spawn a shell and run command under cursor.
+        ${FFF_KEY_RUN_WITH_SHELL:=\"})
+            reset_terminal
+
+            # Make fff aware of how many times it is nested.
+            export FFF_LEVEL
+            ((FFF_LEVEL++))
+		
+	    # FIXME this does not work in tmux mode
+            if [ -x ${list[scroll]} ]; then 
+		cd "$PWD" && $SHELL ${list[scroll]}
+	    else
+	    	notify -d 5 "Not an executable: ${list[scroll]}"
+	    fi
+
+            setup_terminal
+            redraw full
+        ;;
+
+        # Mark files for operation.
+        ${FFF_KEY_YANK:=y}|\
+        ${FFF_KEY_MOVE:=m}|\
+        ${FFF_KEY_TRASH:=d}|\
+        ${FFF_KEY_LINK:=s}|\
+        ${FFF_KEY_BULK_RENAME:=b})
+            mark "$scroll" "$1"
+        ;;
+
+        # Mark all files for operation.
+        ${FFF_KEY_YANK_ALL:=Y}|\
+        ${FFF_KEY_MOVE_ALL:=M}|\
+        ${FFF_KEY_TRASH_ALL:=D}|\
+        ${FFF_KEY_LINK_ALL:=S}|\
+        ${FFF_KEY_BULK_RENAME_ALL:=B})
+            mark all "$1"
+        ;;
+
+        # Do the file operation.
+        ${FFF_KEY_PASTE:=p})
+            [[ ${marked_files[*]} ]] && {
+                [[ ! -w $PWD ]] && {
+                    cmd_line "warn: no write access to dir. Repeat the command from a writeable dir."
+                    return
+                }
+
+                # Clear the screen to make room for a prompt if needed.
+                clear_screen
+                reset_terminal
+
+                stty echo
+                if [ ${file_program[0]} != trash ]; then
+			printf '\e[1mfff\e[m: %s\n' "Running ${file_program[0]}"
+		fi
+                "${file_program[@]}" "${marked_files[@]}" .
+		rc=$?
+                stty -echo
+		if [ $rc != 0 ]; then
+			cmd_line "Error running ${file_program[@]} ${marked_files[@]}" 
+		fi
+
+                marked_files=()
+                setup_terminal
+                redraw full
+            }
+        ;;
+
+        # Clear all marked files.
+        ${FFF_KEY_CLEAR:=c})
+            [[ ${marked_files[*]} ]] && {
+                marked_files=()
+                redraw
+            }
+        ;;
+
+        # Rename list item.
+        ${FFF_KEY_RENAME:=r})
+            [[ ! -e ${list[scroll]} ]] &&
+                return
+
+            cmd_line "rename ${list[scroll]##*/}: "
+
+            [[ $cmd_reply ]] &&
+                if [[ -e $cmd_reply ]]; then
+                    cmd_line "warn: '$cmd_reply' already exists."
+
+                elif [[ -w ${list[scroll]} ]]; then
+                    mv "${list[scroll]}" "${PWD}/${cmd_reply}"
+                    redraw full
+
+                else
+                    cmd_line "warn: no write access to file."
+                fi
+        ;;
+
+        # Create a directory.
+        ${FFF_KEY_MKDIR:=n})
+            cmd_line "mkdir: " "dirs"
+
+            [[ $cmd_reply ]] &&
+                if [[ -e $cmd_reply ]]; then
+                    cmd_line "warn: '$cmd_reply' already exists."
+
+                elif [[ -w $PWD ]]; then
+                    mkdir -p "${PWD}/${cmd_reply}"
+                    redraw full
+
+                else
+                    cmd_line "warn: no write access to dir."
+                fi
+        ;;
+
+        # Create a file.
+        ${FFF_KEY_MKFILE:=f})
+            cmd_line "mkfile: "
+
+            [[ $cmd_reply ]] &&
+                if [[ -e $cmd_reply ]]; then
+                    cmd_line "warn: '$cmd_reply' already exists."
+
+                elif [[ -w $PWD ]]; then
+                    : > "$cmd_reply"
+                    redraw full
+
+                else
+                    cmd_line "warn: no write access to dir."
+                fi
+        ;;
+
+        # Show files verbosely
+        ${FFF_KEY_SHOW_FILES_VERBOSE:=L})
+	  verbose_show_file_list
+	  ;;
+
+        # Show file attributes.
+        ${FFF_KEY_ATTRIBUTES:=x}|" ")
+            if [ -e "${list[scroll]}" ]; then 
+                clear_screen
+                status_line "${list[scroll]}"
+                "${FFF_STAT_CMD:-stat}" "${list[scroll]}"
+		echo ""
+		echo "Use $FFF_KEY_SHOW_FILES_VERBOSE to show full list of files"
+                read -ern 1
+                redraw
+            else 
+	    	notify -d 5 Cannot open "${list[scroll]}"
+    	    fi	
+        ;;
+
+        # Toggle executable flag.
+        ${FFF_KEY_EXECUTABLE:=X})
+            [[ -f ${list[scroll]} && -w ${list[scroll]} ]] && {
+                if [[ -x ${list[scroll]} ]]; then
+                    chmod -x "${list[scroll]}"
+                    status_line "Unset executable."
+                else
+                    chmod +x "${list[scroll]}"
+                    status_line "Set executable."
+                fi
+            }
+        ;;
+
+        # Show image in terminal.
+        ${FFF_KEY_IMAGE:=i})
+            draw_img
+        ;;
+
+        # Go to dir.
+        ${FFF_KEY_GO_DIR:=:})
+            cmd_line "go to dir: " "dirs"
+
+            # Let 'cd' know about the current directory.
+            cd "$PWD" &>/dev/null ||:
+
+            [[ $cmd_reply ]] &&
+                hcd "${cmd_reply/\~/$HOME}" &>/dev/null &&
+                    open "$PWD"
+        ;;
+
+        # Go to '$HOME'.
+	${FFF_KEY_GO_HOME:='~'}|${FFF_KEY_GO_HOME_ALT:=H})
+            open ~
+        ;;
+
+        # Go to trash.
+        ${FFF_KEY_GO_TRASH:=t})
+            get_os
+            open "$FFF_TRASH"
+        ;;
+
+        # Go to previous dir.
+        ${FFF_KEY_PREVIOUS:=-})
+            open "$OLDPWD"
+        ;;
+
+        # Go to scratchpad dir.
+        ${FFF_KEY_SCRATCHPAD:=P})
+            open "$FFF_SCRATCHPAD_DIR"
+        ;;
+
+        # Go to history dir.
+	${FFF_KEY_GO_HIST:='\\'})
+	    # forces sort order to "rt" (grouped does not works well)
+	    FFF_SORT_ORDER="rt"
+	    if [ -d "$FFF_HIST_DIR/ARCHIVE" ]; then
+		    # archive is always shown as first entry
+		    touch "$FFF_HIST_DIR/ARCHIVE" 
+	    fi
+	    status_line "Loading history..."
+            open "$FFF_HIST_DIR"
+        ;;
+
+        # Refresh current dir.
+        ${FFF_KEY_REFRESH:=e})
+            open "$PWD"
+        ;;
+
+        # Set sort order
+        ${FFF_KEY_SORT_ORDER:=o})
+	  set_sort_order
+	  ;;
+        # Switch sort order
+        ${FFF_KEY_SWITCH_SORT_ORDER:=O})
+	  autoswitch_sort_order
+	  ;;
+        # Set Group filter
+        ${FFF_KEY_GROUP_FILTER:="|"})
+	  cmd_line "string to filter?: "
+	  if [ "$cmd_reply" != "" ]; then
+		group_filter="$cmd_reply"
+	  	notify "Filtering group by $group_filter"
+	  else
+		group_filter=""
+	  	notify "Removed group filter"
+	  fi
+	  redraw full
+	  ;;
+
+
+        # Directory favourites.
+        0)
+	  bookmarks_menu
+	  ;;
+        # Directory favourites.
+        [1-9])
+            favourite="FFF_FAV${1}"
+            favourite="${!favourite}"
+
+            [[ $favourite ]] &&
+                open "$favourite"
+        ;;
+
+        # Quit and store current directory in a file for CD on exit.
+        # Don't allow user to redefine 'q' so a bad keybinding doesn't
+        # remove the option to quit.
+	# Also Ctrl-D is mapped to quit
+        q|$'\x4')
+            : "${FFF_CD_FILE:=${XDG_CACHE_HOME:=${HOME}/.cache}/fff/.fff_d}"
+
+            [[ -w $FFF_CD_FILE ]] &&
+                rm "$FFF_CD_FILE"
+
+            [[ ${FFF_CD_ON_EXIT:=1} == 1 ]] &&
+                printf '%s\n' "$PWD" > "$FFF_CD_FILE"
+
+            exit
+        ;;
+	# Ask for bookmark number and set it to current dir
+	# Special keys: "?" list bookmarks, "s" save bookmarks to file , "l" loads bookmarks from file
+        ${FFF_KEY_ADD_BOOKMARK:=a})
+	   doloop=true
+	   while $doloop ; do
+           doloop=false
+	   wait_input_char_with_msg "bookmark number to set [1-9] (TAB or ? to list current)?: "
+	   if [[ "$cmd_reply" == [1-9] ]]; then
+		   favourite="FFF_FAV${cmd_reply}"
+		   eval export $favourite=\"$PWD\"
+	   fi
+	   if [[ "$cmd_reply" == "?" ]] || [[ $cmd_reply == $'\t' ]]; then
+		   clear_screen
+		   echo "List of bookmarks:"
+		   for bn in 1 2 3 4 5 6 7 8 9 ; do
+			favourite="FFF_FAV${bn}"
+			echo "   $bn -> ${!favourite}"
+		   done
+		   echo
+		   doloop=true
+           fi
+	   done
+           redraw full
+	   ;;
+	# View file/dir
+        ${FFF_KEY_VIEW:=v})
+	        reset_terminal
+                if [ -d  "${list[scroll]}" ]; then
+	         if [ "$FFF_MULTIPLEXER" != "" ]; then
+			wname=$(basename "${list[scroll]}")
+			rename_window "dir:$wname" 
+		 fi
+		 du_result=$(du -sh "${list[scroll]}")
+		 if [[ "$NCDU" != "" ]]; then
+			$NCDU "${list[scroll]}"
+		 fi
+		 cmd_line "$du_result"
+		else
+	         if [ "$FFF_MULTIPLEXER" != "" ]; then
+			wname=$(basename "${list[scroll]}")
+			rename_window "file:$wname" 
+		 fi
+		 clear
+		 "${PAGER:-less}" "${list[scroll]}"
+		fi
+		restore_title
+	        setup_terminal
+                redraw 
+	   ;;
+	# Open custom menu
+        ${FFF_KEY_MENU:==})
+		if [ -x "$FFF_MENU" ]; then
+			reset_terminal
+			user_menu $FFF_MENU
+			setup_terminal
+			redraw 
+		else
+			notify -d 3 "Menu is not defined. Create $FFF_MENU file to use this command."
+		fi
+	   ;;
+	# Annotate File
+        ${FFF_KEY_ANNOTATE:="N"})
+			annotate
+	   ;;
+        ${FFF_KEY_SEARCH_NOTES:="'"})
+			search_annotate
+	   ;;
+        ${FFF_KEY_HK_NOTES:="U"})
+			annotations_housekeeper
+	   ;;
+        ${FFF_KEY_TAGS:="T"})
+			hcd "$FFF_TAGS"
+        		redraw full
+	   ;;
+        ${FFF_KEY_BUILD_TAGS:="#"})
+			build_tags
+	   ;;
+        ${FFF_KEY_HELP:=[?]})
+		show_help
+	   ;;
+	# TABS management: > next tab or create , < previous tab , . list and manage tabs
+	${FFF_KEY_TAB_NEXT:=">"})
+	   next_tab=""
+	   pick_next=0
+	   for tab in $FFF_TABS; do
+		 if [ $pick_next -eq 1 ]; then
+			 next_tab=$tab
+			 pick_next=0
+		 fi
+		 if [ "$next_tab" == "" ] && [ $CURRENT_TAB == $tab ]; then
+			pick_next=1
+		 fi
+	   done
+	   # we're at last tab ... create new one
+	   if [[ "$next_tab" == "" ]]; then
+		new_tab
+	   else
+		switch_to_tab $next_tab
+	   fi
+           redraw full
+	   ;;
+	${FFF_KEY_TAB_PREV:="<"})
+	   if [ "$CURRENT_TAB" != main ]; then
+		prev_tab=""
+		t_tab=""
+		for tab in $FFF_TABS; do
+		 if [[ $tab == main ]]; then
+			 prev_tab=$tab
+			 continue
+		 fi
+		 if [ "$t_tab" == "" ] && [ $CURRENT_TAB == $tab ]; then
+			t_tab=$prev_tab
+		 fi
+		 prev_tab=$tab
+		done
+		if [ "$t_tab" != "" ]; then
+			switch_to_tab $t_tab
+		else
+			notify "no previous tab."
+		fi
+	   fi
+	   redraw full
+	   ;;
+	${FFF_KEY_TAB_MENU:=","} | $'\t' )
+	   tabs_menu
+	   ;;
+	${FFF_KEY_SYMLINK_DEREFERENCE:="^"})
+           if [ "${FFF_DEREFERENCE_SYMLINKS}" != "" ]; then
+		FFF_DEREFERENCE_SYMLINKS=""
+		notify "Dereference symlinks is OFF"
+	   else
+		FFF_DEREFERENCE_SYMLINKS="L"
+		notify "Dereference symlinks is ON"
+	   fi
+	   ;;
+
+        ${FFF_KEY_CLEANLINK:="R"})		
+			tmplist="${XDG_CACHE_HOME:=${HOME}/.cache}/fff_broken_links.$$.txt"
+			cp /dev/null $tmplist
+			chmod 700 $tmplist
+			find . -maxdepth 1 -type l|  awk '{ gsub(/\\/,"&\\"); print $0 }' | while read file ; do
+				if [ ! -e "$file" ]; then
+					echo "$file" >> $tmplist
+				fi
+			done
+			nbroken=$(wc -l $tmplist | awk '{print $1}')
+			if [ $nbroken -eq 0 ]; then
+				notify "There are no broken links in $PWD"
+			else
+				notify -d 3 "Found $nbroken broken links - Edit file and save it leaving the paths to remove"
+    				"${EDITOR:-vi}" "$tmplist"
+				cat "$tmplist" |  awk '{ gsub(/\\/,"&\\"); print $0 }' | while read file_to_remove; do
+					echo "Removing $file_to_remove"
+					rm "$file_to_remove"
+				done
+	   			redraw full
+				notify "Cleaned broken links"
+			fi
+			;;
+
+        ${FFF_KEY_SIZE:="_"})
+			set_file_size_filter
+			;;
+
+        ${FFF_KEY_SETTINGS:="@"})
+			settings_page
+			;;
+
+        ${FFF_KEY_CLIPCOPY:="I"})
+	   if [ "$XCLIP" != "" ]; then
+		awk 'BEGIN {
+			print "#!/usr/bin/env bash\n#\n# fff - fucking fast file-manager.\n# Uncommented source"
+			}
+			{
+			if (substr($1,1,1)!="#") print $0
+			}' $0 | xclip -sel c
+		if [ $? -eq 0 ]; then
+			notify -d 2 "fff has been copied to clipboard - paste it with editor on target system"
+			notify -d 3 "alternatively use \"cat > fff\" then paste and hit Ctrl-D"	
+			notify -d 2 "When done, run chmod 755 fff"
+		else
+			notify "xclip command failed - cannot proceed with this command"
+		fi
+	   else
+		notify "xclip is not available - cannot copy fff to clipboard"
+	   fi
+	   #env | $PAGER
+	   #redraw 
+	   ;;
+	"*")
+		notify select all is not implemented
+		;;
+	*)
+	   #hexkey=$(echo ${special_key} | awk ' 
+	   hexkey=$(echo "$1" | awk ' 
+		BEGIN { for (i = 0; i < 128; i++) { 
+		       table = sprintf("%s%c", table, i); 
+		    }  
+		} 
+		function chartohex (char) { 
+		    return sprintf("\\x%x", index(table, char)-1); 
+		} 
+		{ # examples 
+		   print chartohex(substr($0,1,1)); 
+		}')
+	   wait_input_char_with_msg "Unassigned char {$1} bash code \$'$hexkey' "
+	   ;;
+
+    esac
+}
+
+search_to_scratchpad() {
+	sourcedir="$1"
+	search_pattern="$2"
+
+	if [ ! -d "$sourcedir" ]; then
+		cmd_line "Error: invalid source dir"
+		return
+	fi
+	if [ "$search_pattern" == "" ]; then
+		cmd_line "No search pattern - skipped search"
+		return
+	fi
+	savedir="$PWD"
+	ndir=$(echo $sourcedir | awk '{ gsub("/","_"); print $0}')
+	targetdir="$FFF_SCRATCHPAD_DIR/${search_pattern}_FROM_${ndir}"
+	if [ -d "$targetdir" ]; then
+		rm -rf "$targetdir"
+	fi
+	cd "$sourcedir"
+	find . -type f | awk -vsearch_pattern="$search_pattern" 'BEGIN { IGNORECASE=1 } { n=split($0,p,"/"); last_token=p[n]; if (index(last_token,search_pattern)>0) print $0 }' | sort -u | while read file ; do
+		filename=$(basename "$file")
+		dir=$(dirname "$file")
+		if [ ! -d "$targetdir/$dir" ]; then
+			mkdir -p "$targetdir/$dir"
+		fi
+		if [ ! -d "$targetdir/flatview" ]; then
+			mkdir -p "$targetdir/flatview"
+		fi
+		if [ ! -L  "$targetdir/$dir/$filename" ]; then
+			ln -s "$sourcedir/$file" "$targetdir/$dir/$filename"
+		fi
+		ct=1
+		_filename=$filename
+		while [ $ct -gt 0 ]; do
+		  if [ ! -L  "$targetdir/flatview/$filename" ]; then
+			ln -s "$sourcedir/$file" "$targetdir/flatview/$filename"
+			ct=0
+		  else
+			filename="${ct}_${_filename}"
+			ct=$(($ct + 1 ))
+			if [ $ct -gt 10000 ]; then
+				cmd_line "Warning: more than 10000 files with the same name $_filename - Limiting flatview"
+				ct=0
+			fi
+		  fi
+		done
+	done
+	notify "Created scratchpad list $targetdir"
+	cd "$savedir"
+}
+main() {
+    [[ "$1" == -c ]] && [[ "$2" == RUNSHELL ]] && {
+            reset_terminal
+            # Make fff aware of how many times it is nested.
+            export FFF_LEVEL
+            ((FFF_LEVEL++))
+	    cd "$PWD"
+	    curdir=$(pwd)
+	    cbase=$(basename "$curdir")
+	    if [ "$FFF_MULTIPLEXER" != "" ]; then
+	    	wname="sh:$CURRENT_TAB:$cbase"
+	    else
+		wname="fff:$CURRENT_TAB"
+	    fi
+	    bg="\e[47m"
+	    if [ "$myshell" = bash ]; then
+	    	myprompt="\n\[\e]0;\h: \W\]\033[1;35m\][fff($FFF_LEVEL)]\033[00m\]-\[\033[1;31m\]\u@\h\[\033[00m\]:\[\033[;94m\]\[\033[01m\]$bg\w\[\033[00m\]\n[$wname]\$ "
+	    else
+		if [ $(whoami) != root ]; then
+			pchar='$'
+		else
+			pchar="#"
+		fi
+	    	myprompt="[$wname]$pchar "
+	    fi
+	    export FFF_PS1="$myprompt"
+	    PS1="$myprompt" $SHELL $SHELL_OPTS
+            ((FFF_LEVEL--))
+            setup_terminal
+            redraw 
+	    exit 
+    }
+
+    # Handle a directory as the first argument.
+    # 'cd' is a cheap way of finding the full path to a directory.
+    # It updates the '$PWD' variable on successful execution.
+    # It handles relative paths as well as '../../../'.
+    #
+    # '||:': Do nothing if 'cd' fails. We don't care.
+    # Accepted args: -v -m -i -h -p
+    cd "${2:-$1}" &>/dev/null ||:
+
+    [[ $1 == -v ]] && {
+        printf '%s\n' "fff $VER"
+        exit
+    }
+
+    # menu mode
+    [[ $1 == -m ]] && {
+	menufile="$FFF_MENU_DIR/$2"
+    	if [ -e "$menufile" ]; then
+		user_menu "$menufile"
+	else
+		echo "Error: cannot find menu $menufile"
+	fi
+        exit
+    }
+    
+   
+    # tmux/screen mode
+    [[ $1 == -t ]] && {
+	has_tmux=$(which tmux)
+	has_screen=$(which screen)
+	if [ "$2" != "" ]; then
+		export FFF_SESSION_NAME="$2"
+	else
+		export FFF_SESSION_NAME="fff"
+	fi
+	if [ "$has_tmux" != "" ]; then
+		echo "Running fff in tmux ..."
+		export FFF_MULTIPLEXER=tmux
+		export SHELL="$FFF"
+    		tmuxcfg="${XDG_CACHE_HOME:=${HOME}/.cache}/fff/fff_tmux.conf"
+cat << EOTMUXCFG > "$tmuxcfg"
+unbind C-b
+set-option -g prefix C-f
+set-option -g status-left "2nd[C-f] " 
+set-option -g status-position top
+
+# mouse settings
+## new tmux versions mouse settings
+set-option -g mouse on
+
+
+#set-option -g status-style "fg=green,bg=black" 
+set-option -g status-style "fg=blue,bg=cyan" 
+#setw -g window-status-current-style fg=colour123,bg=colour20 
+# for tmux 2.x
+setw -g window-status-current-style fg=white,bg=blue
+set-window-option  -g mode-keys vi
+EOTMUXCFG
+		tmux -f "$tmuxcfg" new-session -A -s "$FFF_SESSION_NAME"
+        	exit 0
+	fi
+	if [ "$has_screen" != "" ]; then
+		echo "Running fff in screen ..."
+		export FFF_MULTIPLEXER=screen
+		echo "NOT YET IMPLEMENTED"
+        	exit 0
+	fi
+	echo "Error: cannot find neither tmux nor screen"
+        exit 1
+    }
+
+    # install fff hooks
+    [[ $1 == -i ]] && {
+	shell_name=$(basename $SHELL)
+	case $shell_name in 
+	bash|sh)
+		rcfile=$HOME/.bashrc	
+		;;
+	csh)
+		rcfile=$HOME/.cshrc	
+		;;
+	zsh)
+		rcfile=$HOME/.zshrc	
+		;;
+	ksh)
+		rcfile=$HOME/.kshrc	
+		;;
+	tcsh)
+		rcfile=$HOME/.tcshrc	
+		;;
+	*)
+		echo "$SHELL is not managed for FFF Hook installation"
+		;;
+	esac
+
+	if [ "$rcfile" != "" ] && [ -e $rcfile ]; then	
+	     grep FFF_HOOK $rcfile > /dev/null 2>/dev/null
+	     if [ $? -eq 1 ]; then
+	        echo "Installing FFF HOOK under $rcfile ..."
+cat << EOH >> $rcfile
+if [ "\$FFF_LEVEL" != "" ]; then if [ "\$FFF_PS1" != "" ]; then PS1="\$FFF_PS1" ; else PS1="------- Spawn from fff - depth \$FFF_LEVEL ------\n\$PS1" ; fi;fi # FFF_HOOK_PS1
+EOH
+		else
+	        	echo "FFF_HOOK is already installed in $rcfile ..."
+	     fi
+	fi
+        exit
+    }
+
+    [[ $1 == -h ]] && {
+	man fff 2> /dev/null
+	# if man page is not installed, fallback to help
+	if [ $? -ne 0 ]; then
+		show_help
+	fi
+	exit
+    }
+
+    # Store file name in a file on open instead of using 'FFF_OPENER'.
+    # Used in 'fff.vim'.
+    [[ $1 == -p ]] &&
+        file_picker=1
+
+    # bash 5 and some versions of bash 4 don't allow SIGWINCH to interrupt
+    # a 'read' command and instead wait for it to complete. In this case it
+    # causes the window to not redraw on resize until the user has pressed
+    # a key (causing the read to finish). This sets a read timeout on the
+    # affected versions of bash.
+    # NOTE: This shouldn't affect idle performance as the loop doesn't do
+    # anything until a key is pressed.
+    # SEE: https://github.com/dylanaraps/fff/issues/48
+    ((BASH_VERSINFO[0] > 3)) &&
+        read_flags=(-t 0.05)
+
+    ((${FFF_LS_COLORS:=1} == 1)) &&
+        get_ls_colors
+
+    ((${FFF_HIDDEN:=0} == 1)) &&
+        shopt -s dotglob
+
+    # Create the trash and cache directory if they don't exist.
+    mkdir -p "${XDG_CACHE_HOME:=${HOME}/.cache}/fff" \
+             "${FFF_TRASH:=${XDG_DATA_HOME:=${HOME}/.local/share}/fff/trash}" \
+             "${FFF_NOTES:=${XDG_DATA_HOME:=${HOME}/.local/share}/fff/notes}" \
+             "${FFF_TAGS:=${XDG_DATA_HOME:=${HOME}/.local/share}/fff/tags}" \
+	     "${FFF_BOOKMARKS_DIR}" "${FFF_SAVED_TABS_DIR}" "${FFF_SCRATCHPAD_DIR}" "${FFF_HIST_DIR}"
+
+    # 'nocaseglob': Glob case insensitively (Used for case insensitive search).
+    # 'nullglob':   Don't expand non-matching globs to themselves.
+    shopt -s nocaseglob nullglob
+
+    # Trap the exit signal (we need to reset the terminal to a useable state.)
+    trap 'reset_terminal' EXIT
+
+    # Trap the window resize signal (handle window resize events).
+    trap 'get_term_size; redraw' WINCH
+
+    get_os
+    get_term_size
+    get_w3m_path
+    setup_options
+    setup_terminal
+    redraw full
+
+    # Vintage infinite loop.
+    for ((;;)); {
+        read "${read_flags[@]}" -srn 1 && key "$REPLY"
+
+        # Exit if there is no longer a terminal attached.
+        [[ -t 1 ]] || exit 1
+    }
+}
+
+### MAIN
+export PAGER=${PAGER:-less}
+export EDITOR=${EDITOR:-vi}
+restore_title
+main "$@"
+
+
+############ How to get list of available keys
+# create help dump:
+# 	open help (?), hit "s" and type a temporary file name
+# use this script 
+# cat TEMPORARYFILENAME | awk '{ if ($1) print $1}' | grep -v -e To -e cat -e Then -e Local -e "\-\-\-" -e FFF | awk '{ n=split($1,a,"|"); if ((n>1) && a[1]) for (i=1;i<=n;i++) is_managed[a[i]]=n ; else is_managed[$1]=1 } END { for (i=32;i<=127;i++) { ch=sprintf("%c",i) ; if (!is_managed[ch]) printf "%d=%c\n",i,i } }'
+
+######################### TODO
+# - grouped views of symlinks does not work (this is due to missing -L option) (see -L opt below)
+# - [MacOS] use gfind or gnu find or stat see https://stackoverflow.com/questions/752818/find-lacks-the-option-printf-now-what
+# - explain filter combined with find (example filter csv , find enm)
+# - customization of maxlines
+# - customization of descend link opt -L opt 
+# - introduce custom .fffrc script for shell
+# - introduce custom command execution on selected files
+# - introduce custom menu (for tar, touch, time align etc)
+# - quick step to next "---" entry in grouped view
+# - selection of all files with * (ask for what operation c,m,s,b)
+# - available chars for commands: # $ % & ' ( ) * + ;   @ A C E N Q T U V W Z [  ]  `  u w z { }    
+# - archive old history entries
+# - z command to expand existing commands (eg z then wait for other like x)
+# - ; to open menu for file types
+# - add symlinks as labels to scratchpad
+# - 0 bookmark to point to fff config 
+# done:
+# - introduce clean of broken links
+# - introduce filter for files by size
+# - preserve search string on cmd execution
+# - add status for filter, review status and filter reset
+# - add option to change FFF_MAXSIZE
