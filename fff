@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # fff - fucking fast file-manager.
-VER="2.96d"
+VER="2.97"
 declare -A TABS_LOCATION
 FFF_HOME="${HOME}/.local/share/fff"
 FFF_BOOKMARKS_DIR="${FFF_HOME}/bookmarks"
@@ -2115,7 +2115,6 @@ key() {
             # Make fff aware of how many times it is nested.
             export FFF_LEVEL
             ((FFF_LEVEL++))
-		
 	    cd "$PWD"
 	    bg="\e[47m"
 	    curdir=$(pwd)
@@ -2135,9 +2134,16 @@ key() {
 		fi
 	    	myprompt="[$wname]$pchar "
 	    fi
-	    if [ "$FFF_MULTIPLEXER" != "" ]; then
+	    if [ "$TMUX" = "" ] && [ "$FFF_MULTIPLEXER" != "" ]; then
 		 export CURRENT_TAB
-	   	 tmux new-window -t "$FFF_SESSION_NAME" -n "$wname" RUNSHELL
+		 if [ $(basename $SHELL) = fff ]; then
+	   	 	tmux new-window -t "$FFF_SESSION_NAME" -n "$wname" RUNSHELL
+		 else
+	    		export FFF_MULTIPLEXER=$FFF_MULTIPLEXER
+			fff_dir=$(dirname $0)
+			fff_bin="$fff_dir/fff"
+	   	 	tmux new-window -n "$wname" $fff_bin 
+		 fi
 	    else
 	     	 export FFF_PS1="$myprompt"
 	   	 PS1="$myprompt" $SHELL $SHELL_OPTS
@@ -2734,6 +2740,38 @@ main() {
     }
     
    
+    # upgrade
+    [[ $1 == -u ]] && {	
+	tmpdir=${TMPDIR:-/tmp}
+	url='https://raw.githubusercontent.com/ibox0/fff/main/fff'
+	savedir="$PWD"
+	cd "$tmpdir"
+	wget -q $url
+	if [ $? -ne 0 ]; then
+		echo "Error downloading $url"
+		echo "fff upgrade failed"
+		cd "$savedir"
+		exit 1
+	else
+		do_upgrade_to_ver=$(cat fff | awk -vFS=VER= -vcurver=$VER 'BEGIN { doupg="" } {if (NF>1) { dw_ver=$2 ; if (dw_ver > curver) doupg=dw_ver }} END { print doupg }')
+		if [ "$do_upgrade_to_ver" != "" ]; then
+			target="$0"
+			echo "Upgrading fff from $VER to $do_upgrade_to_ver"
+			echo cp fff "$0"
+			if [ $? -ne 0 ]; then
+				echo "Error upgrading fff - check access rights"
+			else
+				echo chmod 755 "$0"
+			fi
+		else
+			dwver=$(grep ^VER= fff)
+			echo "This fff (VER=$VER) is newer than the official one ($dwver)"
+		fi
+	fi
+	rm fff
+	cd "$savedir"
+        exit
+    }
     # tmux/screen mode
     [[ $1 == -t ]] && {
 	has_tmux=$(which tmux)
@@ -2743,11 +2781,28 @@ main() {
 	else
 		export FFF_SESSION_NAME="fff"
 	fi
+	# check if has tmux
 	if [ "$has_tmux" != "" ]; then
-		echo "Running fff in tmux ..."
 		export FFF_MULTIPLEXER=tmux
-		export SHELL="$FFF"
-    		tmuxcfg="${XDG_CACHE_HOME:=${HOME}/.cache}/fff/fff_tmux.conf"
+		echo "Running fff in tmux ..."
+		# check if already in tmux
+		if [ "$TMUX" != "" ]; then
+			echo "Already in tmux!"
+			# already in tmux
+			tmux_fff_session=$(tmux ls | awk '{ if ($1=="fff:") print $1}')
+			if [ "$tmux_fff_session" != "" ]; then
+				export FFF_SESSION_NAME="fff"
+				# an fff session for tmux already exists
+				fff
+				exit 0
+			else
+				fff 
+				exit 0	
+			fi # tmux fff session check
+		else
+			# not tmux sessions
+			export SHELL="$FFF"
+    			tmuxcfg="${XDG_CACHE_HOME:=${HOME}/.cache}/fff/fff_tmux.conf"
 cat << EOTMUXCFG > "$tmuxcfg"
 unbind C-b
 set-option -g prefix C-f
@@ -2766,9 +2821,10 @@ set-option -g status-style "fg=blue,bg=cyan"
 setw -g window-status-current-style fg=white,bg=blue
 set-window-option  -g mode-keys vi
 EOTMUXCFG
-		tmux -f "$tmuxcfg" new-session -A -s "$FFF_SESSION_NAME"
-        	exit 0
-	fi
+			tmux -f "$tmuxcfg" new-session -A -s "$FFF_SESSION_NAME"
+        		exit 0
+          	fi # check if already in tmux
+	fi # has tmux
 	if [ "$has_screen" != "" ]; then
 		echo "Running fff in screen ..."
 		export FFF_MULTIPLEXER=screen
@@ -2884,6 +2940,7 @@ EOH
 ### MAIN
 export PAGER=${PAGER:-less}
 export EDITOR=${EDITOR:-vi}
+export VISUAL=${VISUAL:-vi}
 restore_title
 main "$@"
 
