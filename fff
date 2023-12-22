@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # fff - fucking fast file-manager.
-VER="2.97b"
+VER="2.97c"
 declare -A TABS_LOCATION
 FFF_HOME="${HOME}/.local/share/fff"
 FFF_BOOKMARKS_DIR="${FFF_HOME}/bookmarks"
@@ -2753,7 +2753,7 @@ main() {
 		cd "$savedir"
 		exit 1
 	else
-		do_upgrade_to_ver=$(cat fff | awk -vFS=VER= -vcurver=$VER 'BEGIN { doupg="" } {if (NF>1) { dw_ver=$2 ;gsub("\"","",dw_ver); if (dw_ver > curver) doupg=dw_ver }} END { print doupg }')
+		do_upgrade_to_ver=$(cat fff | awk -vFS=VER= -vcurver=$VER 'BEGIN { doupg="" } {if (NF>1) { dw_ver=$2 ;gsub("\"","",dw_ver); if (dw_ver > curver) doupg=dw_ver ; exit }} END { print doupg }')
 		if [ "$do_upgrade_to_ver" != "" ]; then
 			target="$0"
 			echo "Upgrading fff from $VER to $do_upgrade_to_ver"
