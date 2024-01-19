@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # fff - fucking fast file-manager.
-VER="2.97d"
+VER="2.97e"
 declare -A TABS_LOCATION
 FFF_HOME="${HOME}/.local/share/fff"
 FFF_BOOKMARKS_DIR="${FFF_HOME}/bookmarks"
@@ -35,6 +35,7 @@ mydir_fullpath=$(cd $mydir && pwd)
 if [ "$FFF" = "" ]; then
 	export FFF="$mydir_fullpath/$myname"
 fi
+
 
 case $myshell in 
 	sh)
@@ -249,15 +250,28 @@ annotations_housekeeper() {
 		notify "All notes are ok"
 	fi
 }
-build_tags() {
+do_build_tags() {
+	TARGET_FFF_TAGS="$1"
+	CURTAG="$2"
+	mytagname=$(basename "$TARGET_FFF_TAGS")
 	# clean existing tags
-	notify "Rebuilding tags ..."
-	if [ -d "$FFF_TAGS" ]; then
-		find "$FFF_TAGS" -type l -exec rm {} \; 
-		find "$FFF_TAGS" -type d -exec rmdir {} \;  2> /dev/null
+	if [ -d "$TARGET_FFF_TAGS" ]; then
+		if [ "$CURTAG" != "" ];  then
+			if [ "$CURTAG" != "$mytagname" ]; then
+				ls "$TARGET_FFF_TAGS"  | while read tobj ; do
+					if [ -d "$TARGET_FFF_TAGS/$tobj" ]; then
+					    find "$TARGET_FFF_TAGS/$tobj" -type l -exec rm {} \; 
+					    rmdir "$TARGET_FFF_TAGS/$tobj" 
+					fi
+				done
+			fi
+		else
+			find "$TARGET_FFF_TAGS" -type l -exec rm {} \; 
+		fi
+		find "$TARGET_FFF_TAGS" -type d -exec rmdir {} \;  2> /dev/null
 	fi
 	find $FFF_NOTES -name "*.md" | while read notefile ; do
-		taginfo=$(cat "$notefile" | awk '{
+		taginfo=$(cat "$notefile" | awk -vcurtag="$CURTAG" -vmytagname="$mytagname" '{
 			if (($1=="#") && ($2=="Notes") && ($3=="For:")) { target=$0; sub("# Notes For: ","",target) ; next }
 			st=$0
 			i=index(st,"#")
@@ -277,7 +291,8 @@ build_tags() {
 				if (i>1)   { st=substr(st,i+1) ; i=index(st,"#");  }
 				e=index(st," ")
 				if (e) tag=substr(st,i,e-1) ; else tag=substr(st,i)
-				if (tag && (substr(tag,1,1)=="#") ) {
+				if (curtag && tag==curtag)  matched=1
+				if (tag && (tag!=mytagname) && (substr(tag,1,1)=="#") ) {
 					gsub("#","",tag)
 					if (tag) if (tags) tags=tags ",#" tag ; else tags="#" tag
 				}
@@ -287,14 +302,16 @@ build_tags() {
 			} # end while
 			}
 			END {
-				if (target) print  target ";" tags
+				doprint=1
+				if (curtag && !matched) doprint=0
+				if (target && doprint) print  target ";" tags
 			}')
 		if [ "$taginfo" != "" ]; then
 			filename=$(echo "$taginfo" | awk -vFS=";" '{ print $1 }')
 			tags=$(echo "$taginfo" | awk -vFS=";" '{ print $2 }')
 			if [ -e "$filename" ]; then
 				for tag in $(echo $tags | awk -vFS=, '{ for (i=1;i<=NF;i++) print $i }'); do
-					dir="$FFF_TAGS/$tag"
+					dir="$TARGET_FFF_TAGS/$tag"
 					if [ ! -d "$dir" ]; then
 						mkdir -p "$dir"
 						ntag=$(( $ntag + 1 ))
@@ -308,8 +325,21 @@ build_tags() {
 			fi
 		fi
 	done
-	ntagged=$(find "$FFF_TAGS" -type l | wc -l) 
+}
+
+build_tags() {
+	notify "Rebuilding tags ..."
+	do_build_tags "$FFF_TAGS" ""
 	ntag=$(find "$FFF_TAGS" -type d  | wc -l)
+	# nest 1 level of tagging
+	ls "$FFF_TAGS"  | while read tdir ; do
+		tagdir="$FFF_TAGS/$tdir"
+		if [ -d "$tagdir" ]; then
+			tagname=$(basename "$tagdir")
+			do_build_tags "$tagdir" "$tagname"
+		fi
+	done
+	ntagged=$(find "$FFF_TAGS" -type l | wc -l) 
 	notify "Tag rebuild completed (added $ntagged tagged objects in $ntag tags) ..."
 }
 
@@ -437,7 +467,7 @@ show_help() {
         ${FFF_KEY_ANNOTATE:="N"}		Annotate file or folder
         ${FFF_KEY_SEARCH_NOTES:="'"}		Search for annotated files
         ${FFF_KEY_HK_NOTES:="U"}		Annotation housekeeper
-        ${FFF_KEY_TAGS:="T"}			Go to Tags folder
+        ${FFF_KEY_TAGS:="T"}		Go to Tags folder
         ${FFF_KEY_BUILD_TAGS:="#"}		Rebuild Tags lists
 
 	To install fff on target host you can use the ${FFF_KEY_CLIPCOPY} command or xclip:
@@ -455,7 +485,7 @@ show_help() {
 	Local fff saved data location: ${FFF_HOME}
 EOH
 	# for dev
-	# show_colors; read
+	#show_colors; read
         redraw 
 }
 
@@ -2746,7 +2776,7 @@ main() {
 	url='https://raw.githubusercontent.com/ibox0/fff/main/fff'
 	savedir="$PWD"
 	cd "$tmpdir"
-	wget -q $url
+	wget --no-cache -q $url
 	if [ $? -ne 0 ]; then
 		echo "Error downloading $url"
 		echo "fff upgrade failed"
@@ -2767,7 +2797,7 @@ main() {
 			cat fff | awk -vFS=VER= -vcurver=$VER 'BEGIN { doupg="" ; difftype="equal" } {if (NF>1) { dw_ver=$2 ;gsub("\"","",dw_ver); if (dw_ver < curver) { doupg=dw_ver ; difftype="greater than" };  exit }} END { print "This fff version (" curver ") is " difftype " official one (" dw_ver ")" }'
 		fi
 	fi
-	rm fff
+	echo rm fff
 	cd "$savedir"
         exit
     }
