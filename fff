@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # fff - fucking fast file-manager.
-VER="2.97e"
+VER="2.97g"
 declare -A TABS_LOCATION
 FFF_HOME="${HOME}/.local/share/fff"
 FFF_BOOKMARKS_DIR="${FFF_HOME}/bookmarks"
@@ -127,13 +127,19 @@ hcd() {
 }
 
 rename_window() {
-	if [ "$FFF_MULTIPLEXER" = "tmux" ]; then
+	if [ "$FFF_MULTIPLEXER" != "" ]; then
 		tmux rename-window "$*"
+	fi
+	if [ "$ZELLIJ_SESSION_NAME" != "" ]; then
+	     echo -ne "\033]0;$*\007" 
+	fi
+	if [ "$myprompt" != "" ]; then
+		myprompt="$*"
 	fi
 }
 
 restore_title() {
-	        if [ "$FFF_MULTIPLEXER" != "" ]; then
+	        if [ "$FFF_MULTIPLEXER" != "" ] || [ "$ZELLIJ_SESSION_NAME" != "" ]; then
 			if [ "$CURRENT_TAB" = "" ]; then
 				CURRENT_TAB=main
 			fi
@@ -142,7 +148,8 @@ restore_title() {
 		fi
 }
 compute_note_name() {
-	notename="$FFF_NOTES/${wname}_fffnotes.md"
+	bname=$(basename "${list[scroll]}")
+	notename="$FFF_NOTES/${bname}_fffnotes.md"
 	# clash in note name, select different one
 	# FIXME: not implemented
 	echo "$notename"
@@ -714,7 +721,7 @@ read_dir() {
     # Set window name.
     curdir=$(pwd)
     wname=$(basename "$curdir")
-    printf '\e]2;fff: %s\e'\\ "$wname"
+    #printf '\e]2;fff: %s\e'\\ "$wname"
 
     # If '$PWD' is '/', unset it to avoid '//'.
     [[ $PWD == / ]] && PWD=
@@ -1909,7 +1916,9 @@ doloop=1
 cancel_str="Cancel"
 if [ "$the_MENU_name" = "main" ]; then
 		up_str=""
+		export FFF="$FFF"
 		export FFF_HOME="$FFF_HOME"
+		export FFF_MENU_DIR="$FFF_MENU_DIR"
 		export FFF_HIST_DIR="${FFF_HIST_DIR}"
 		export FFF_CURRENT_ENTRY="${list[scroll]}"
 		export FFF_PWD="$PWD"
@@ -1920,39 +1929,85 @@ if [ "$the_MENU_name" = "main" ]; then
 		export FFF_tab2="$FFF_tab2"
 	else
 		up_str="Up"
-		# FIXME: cancel from submenu is not implemented
-		cancel_str=""
 fi
 
 while [ \$doloop -eq 1 ]; do
+   clear
    echo ""
    echo "\$FFF_MENUTITLE"
    echo ""
 
-   select  key in \$up_str \$cancel_str  "\${menu_entries[@]}" ; do 
-		#echo Selezionato $key; echo Command ${menu["$key"]}
-		if [ "\$key" != "\$cancel_str" ] && [ "\$key" != "\$up_str" ] && [ "\$REPLY" != q ] && [ "\$REPLY" != "" ]; then
+   i=1
+   echo "Enter number to select action (q exits menus):"
+   if [ "\$up_str" != "" ]; then
+   	opt1=\$up_str 
+   else
+	opt1=\$cancel_str  
+   fi 
+   for o in \$opt1  "\${menu_entries[@]}" ; do 
+        echo "\$i) \$o"
+        let i++
+   done
+   echo -n "> "
+   read reply
+   if [ "\$reply" = "" ]; then
+        echo "cancel"; doloop=0;break
+   fi
+   if [ "\$reply" = "q" ]; then
+	if [ "$menufile" != "" ]; then
+		# propagates error to other submenus
+		exit 5
+	else
+		# we are in main
+		doloop=0
+		exit
+	fi
+   fi
+   n_skip_opts=2
+   answerid=\$(echo \$reply | awk -vn_skip_opts=\$n_skip_opts '\$0 ~ /^[0-9]+$/ { n=int(\$0)-n_skip_opts ; if (n>=0) print n}')
+   if [ "\$answerid" = "" ]; then
+        echo "unsupported answer"; break
+   fi
+
+   if [ "\${menu_entries[\$answerid]}" != "" ]; then
+	key=\${menu_entries[\$answerid]}
+	#echo You selected "\${key}"
+	if [ "\$key" != "\$cancel_str" ] && [ "\$key" != "\$up_str" ] && [ "\$reply" != q ] ; then
 			cmd=\$(echo \${menu["\$key"]} | awk '{print \$1}')
 			if [ "\$cmd" = "MENU" ]; then
 				# this is a submenu
 				menuname=\$(echo "\${menu["\$key"]}" | awk '{print \$2}')
 				\$FFF -m \$menuname
+				if [ \$? -eq 5 ]; then
+					# propagates error to other submenus
+					exit 5
+				fi
 			else
 				if [ "\$the_MENU_name" = main ]; then
 					doloop=0
 				fi
 	        		eval \${menu["\$key"]} 
+				
+				echo ""
+				echo "----------------------------------------------------"
+				echo "Execution completed - Press RETURN to go back to FFF"
+				read k
+				doloop=0
 			fi
 		else
 			doloop=0
 			clear
 		fi
-		break
-   done
+		#break
+    else
+	echo "Invalid menu entry for reply=\$reply, answerid=\${answerid}"
+    fi
 done
 EOS
 		bash $tmpmenu
+		rc2=$?
 		rm "$tmpmenu" "$marked_files_list"
+		return $rc2
 }
 
 key() {
@@ -1968,6 +2023,12 @@ key() {
     }
 
     case ${special_key:-$1} in
+	# skip some spurious chars
+        #$'\x5b'|\
+#        $'\x43'|\
+#        $'\x41')
+#		return
+#		;;
         # Open list item.
         # 'C' is what bash sees when the right arrow is pressed
         # ('\e[C' or '\eOC').
@@ -2182,6 +2243,7 @@ key() {
 
             setup_terminal
             redraw 
+	    restore_title
         ;;
 
         # Spawn a shell and run command under cursor.
@@ -2323,6 +2385,10 @@ key() {
                 clear_screen
                 status_line "${list[scroll]}"
                 "${FFF_STAT_CMD:-stat}" "${list[scroll]}"
+		note=$(compute_note_name)
+		if  [ "$note" != "" ] && [ -e "$note" ]; then
+			head -5 "$note"
+		fi
 		echo ""
 		echo "Use $FFF_KEY_SHOW_FILES_VERBOSE to show full list of files"
                 read -ern 1
@@ -2482,12 +2548,21 @@ key() {
 			wname=$(basename "${list[scroll]}")
 			rename_window "dir:$wname" 
 		 fi
-		 du_result=$(du -sh "${list[scroll]}")
 		 if [[ "$NCDU" != "" ]]; then
 			$NCDU "${list[scroll]}"
+		 else
+		 	du_result=$(du -sh "${list[scroll]}")
+		 	cmd_line "$du_result"
 		 fi
-		 cmd_line "$du_result"
 		else
+	         if [ "$ZELLIJ_SESSION_NAME" != "" ]; then
+			pname=$(basename "${list[scroll]}")
+			zellij action new-pane  -d Right -n "$pname" -c -- "${PAGER:-less}" "${list[scroll]}"
+			restore_title
+	        	setup_terminal
+                	redraw 
+			return
+		 fi
 	         if [ "$FFF_MULTIPLEXER" != "" ]; then
 			wname=$(basename "${list[scroll]}")
 			rename_window "file:$wname" 
@@ -2642,6 +2717,15 @@ key() {
 	"*")
 		notify select all is not implemented
 		;;
+	$'\x5b')
+		# temp FIX glitch with WSL
+		{
+		  original_terminal_state="$(stty -g)"
+		  stty -icanon -echo min 0 time 0
+		  LC_ALL=C dd bs=1 > /dev/null 2>&1
+		  stty "$original_terminal_state"
+		} < /dev/tty
+		;;
 	*)
 	   #hexkey=$(echo ${special_key} | awk ' 
 	   hexkey=$(echo "$1" | awk ' 
@@ -2655,7 +2739,8 @@ key() {
 		{ # examples 
 		   print chartohex(substr($0,1,1)); 
 		}')
-	   wait_input_char_with_msg "Unassigned char {$1} bash code \$'$hexkey' "
+	   #wait_input_char_with_msg "Unassigned char {$1} bash code \$'$hexkey' "
+	   notify "Unassigned char {$1} bash code \$'$hexkey' "
 	   ;;
 
     esac
@@ -2775,7 +2860,7 @@ main() {
 	tmpdir=${TMPDIR:-/tmp}
 	url='https://raw.githubusercontent.com/ibox0/fff/main/fff'
 	savedir="$PWD"
-	cd "$tmpdir"
+	cd "$tmpdir" && [ -e ./fff ] && rm ./fff
 	wget --no-cache -q $url
 	if [ $? -ne 0 ]; then
 		echo "Error downloading $url"
@@ -2794,10 +2879,10 @@ main() {
 				chmod 755 "$0"
 			fi
 		else
-			cat fff | awk -vFS=VER= -vcurver=$VER 'BEGIN { doupg="" ; difftype="equal" } {if (NF>1) { dw_ver=$2 ;gsub("\"","",dw_ver); if (dw_ver < curver) { doupg=dw_ver ; difftype="greater than" };  exit }} END { print "This fff version (" curver ") is " difftype " official one (" dw_ver ")" }'
+			cat fff | awk -vFS=VER= -vcurver=$VER 'BEGIN { doupg="" ; difftype="equal to the" } {if (NF>1) { dw_ver=$2 ;gsub("\"","",dw_ver); if (dw_ver < curver) { doupg=dw_ver ; difftype="greater than" };  exit }} END { print "This fff version (" curver ") is " difftype " official one (" dw_ver ")" }'
 		fi
 	fi
-	echo rm fff
+	rm fff
 	cd "$savedir"
         exit
     }
@@ -2926,6 +3011,8 @@ EOH
     # SEE: https://github.com/dylanaraps/fff/issues/48
     ((BASH_VERSINFO[0] > 3)) &&
         read_flags=(-t 0.05)
+	# AGAG: DISABLED to work well with WSL
+        read_flags=()
 
     ((${FFF_LS_COLORS:=1} == 1)) &&
         get_ls_colors
