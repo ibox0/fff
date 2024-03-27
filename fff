@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 #
 # fff - fucking fast file-manager.
-VER="2.97g"
+VER="2.98"
 declare -A TABS_LOCATION
 FFF_HOME="${HOME}/.local/share/fff"
+FFF_RC="${FFF_HOME}/.fffrc"
 FFF_BOOKMARKS_DIR="${FFF_HOME}/bookmarks"
 FFF_SAVED_TABS_DIR="${FFF_HOME}/tabs"
 FFF_SCRATCHPAD_DIR="${FFF_HOME}/scratchpad"
@@ -17,6 +18,7 @@ FFF_DO_NOT_TRAVERSE_MOUNTS="-mount"
 TMPDIR=${TMPDIR:-/tmp}
 group_by="d"
 group_filter=""
+FFF_README_IN_DIRS="readme.md"
 
 # SPECIAL SHELL MANAGEMENT FOR fff used as tmux shell
 if [ "$SHELL" != "" ] && [ $(basename $SHELL) = "fff" ]; then
@@ -42,7 +44,8 @@ case $myshell in
 		SHELL_OPTS=""
 		;;
 	zsh)
-		SHELL_OPTS="-f"
+		#SHELL_OPTS="-f"
+		SHELL_OPTS=""
 		;;
 	bash)
 	#	SHELL_OPTS="--norc"
@@ -148,7 +151,17 @@ restore_title() {
 		fi
 }
 compute_note_name() {
-	bname=$(basename "${list[scroll]}")
+	if [ "$1" = symlink ]; then 
+	   if [ -L "${list[scroll]}" ]; then
+		linkedfile=$(ls -la "${list[scroll]}" | awk -vFS="-> " '{print $NF}')
+		bname=$(basename "${linkedfile}")
+	   else
+		echo ""
+		return 
+	   fi
+	else
+		bname=$(basename "${list[scroll]}")
+	fi
 	notename="$FFF_NOTES/${bname}_fffnotes.md"
 	# clash in note name, select different one
 	# FIXME: not implemented
@@ -593,7 +606,7 @@ setup_options() {
     [[ -e $FFF_BOOKMARKS ]] && . $FFF_BOOKMARKS
 
     # empty=alphabetical (default and faster), t=modified time , rt=reverse modified time
-    FFF_SORT_ORDER=""
+    FFF_SORT_ORDER=${FFF_SORT_ORDER:-}
 
     # TABS
     FFF_TABS="main"
@@ -602,6 +615,23 @@ setup_options() {
     # check availability of special commands
     NCDU=$(which ncdu 2> /dev/null)
     XCLIP=$(which xclip 2> /dev/null)
+
+    # Load RC file if present
+    if [ -e "${FFF_RC}" ]; then
+	. "${FFF_RC}"
+	# Load tabs file if specified
+	if [ "${FFF_TABSFILE}" != ""  ]; then
+		if [ -e "${FFF_TABSFILE}" ]; then
+			load_tabs "${FFF_TABSFILE}"
+		else
+			echo "Warning: FFF_TABSFILE ($FFF_TABSFILE) not found - resetting it"
+			echo "Use '@' and then 'p' to save permantenly this new setting"
+			sleep 3
+			FFF_TABSFILE=""
+		fi
+	fi
+    fi
+
 }
 
 get_term_size() {
@@ -1382,7 +1412,12 @@ notify() {
 
 save_tabs() {
 	cd "${FFF_SAVED_TABS_DIR}"
+	reset_terminal
+	echo "-----------"
+	ls 
+	echo "-----------"
 	cmd_line "tabs file name?: "
+	setup_terminal
 	cd - > /dev/null
 	if [[ "$cmd_reply" != ""  ]]; then
 		tabs_dir=$(dirname "$cmd_reply")
@@ -1408,9 +1443,18 @@ save_tabs() {
 }
 
 load_tabs() {
-	cd "${FFF_SAVED_TABS_DIR}"
-	cmd_line "tabs file name?: "
-	cd - > /dev/null
+	if [ $# -eq 0 ]; then
+		cd "${FFF_SAVED_TABS_DIR}"
+		reset_terminal
+		echo "-----------"
+		ls 
+		echo "-----------"
+		cmd_line "tabs file name?: "
+		setup_terminal
+		cd - > /dev/null
+	else
+		cmd_reply="$1"
+	fi
 	if [[ "$cmd_reply" != ""  ]]; then
 		if [[ -e  "$cmd_reply"  ]] ; then
 			# absolute path
@@ -1829,6 +1873,24 @@ FFF_TIMEOUT=$FFF_TIMEOUT
 FFF_FILE_SIZE_THRESHOLD=$FFF_FILE_SIZE_THRESHOLD
 # set to "-mount" to avoid mount path navigation 
 FFF_DO_NOT_TRAVERSE_MOUNTS=$FFF_DO_NOT_TRAVERSE_MOUNTS
+# default sort order , one of 
+# empty alphabetical 
+# "t" by time  
+# "rt" by reverse time 
+# "S" by size 
+# "g" grouped by value defined in "group_by"
+FFF_SORT_ORDER="$FFF_SORT_ORDER"
+# group_by, if FFF_SORT_ORDER is "g" use one of the following criteria for grouping
+# "d" group by day
+# "w" group by week
+# "m" group by month
+# "y" group by year 
+group_by="$group_by"
+# Name of the tabs savefile to open at startup - leave empty to use default
+# tabsfile can be a name of a tabs profile under FFF_HOME/tabs dir or a full path filename to a tab configuration file
+FFF_TABSFILE="$tabsfile"
+# if not empty and there are files matching (case insensitive) the set of words below, the relevant readme file is shown in dir attributes page
+FFF_README_IN_DIRS="$FFF_README_IN_DIRS"
 EOTT
 }
 
@@ -1842,19 +1904,20 @@ settings_page() {
 		"${PAGER:-less}" "${current_settings_file}"
                 setup_terminal
                 redraw
-	   elif [[ "$cmd_reply" == "c" ]]; then
+	   elif [[ "$cmd_reply" == "c" ]] || [[ "$cmd_reply" == "p" ]]; then
 	        dump_settings "$current_settings_file"
             	reset_terminal
 		"${EDITOR:-vi}" "${current_settings_file}"
 		chmod 755 "${current_settings_file}"
-		echo "press any key to continue (x to avoid loading the configuration)" ; read myans
+		echo "press any key to continue (x to avoid loading and saving the configuration)" ; read myans
 		if [ "$myans" != "x" ]; then
 			. "${current_settings_file}"
+	   		if [[ "$cmd_reply" == "p" ]]; then
+				cp  "${current_settings_file}" "$FFF_RC"
+			fi
 		fi
                 setup_terminal
                 redraw
-	   elif [[ "$cmd_reply" == "p" ]]; then
-	   	notify -d 2 "not implemented"
 	   fi
 }
 	
@@ -2325,7 +2388,13 @@ key() {
             [[ ! -e ${list[scroll]} ]] &&
                 return
 
-            cmd_line "rename ${list[scroll]##*/}: "
+	    reset_terminal
+            echo "=== Rename of ${list[scroll]}" 
+            ls
+            echo "-----------"
+            read -e cmd_reply
+            setup_terminal
+
 
             [[ $cmd_reply ]] &&
                 if [[ -e $cmd_reply ]]; then
@@ -2385,9 +2454,33 @@ key() {
                 clear_screen
                 status_line "${list[scroll]}"
                 "${FFF_STAT_CMD:-stat}" "${list[scroll]}"
+		# dump notes if any 
+		# look for notes for this file
 		note=$(compute_note_name)
 		if  [ "$note" != "" ] && [ -e "$note" ]; then
+			echo "======== Annotations for file ========"
 			head -5 "$note"
+		fi
+		# look for notes for linked file 
+		linkednote=$(compute_note_name symlink)
+		if  [ "$linkednote" != "" ] && [ -e "$linkednote" ]; then
+			linkedfile_full=$(echo "$linkednote" | awk '{sub("_fffnotes.md$","") ; print $0}')
+			linkedfile=$(basename "$linkedfile_full")
+			echo "=== Annotations for linked file ($linkedfile)"
+			head -5 "$linkednote"
+		fi
+		# dump readme.md information if present
+            	if [ -d "${list[scroll]}" ] && [ "$FFF_README_IN_DIRS" != "" ]; then 
+			cd "${list[scroll]}" 
+			readme_pattern=""
+			for rpattern in $FFF_README_IN_DIRS; do
+				readme_pattern="$readme_pattern -e $rpattern$"
+			done
+			ls | grep -i $readme_pattern| while read readme_filename ; do
+					echo "----------- $readme_filename ---------------"
+					head -6 $readme_filename
+			done
+			cd - > /dev/null
 		fi
 		echo ""
 		echo "Use $FFF_KEY_SHOW_FILES_VERBOSE to show full list of files"
