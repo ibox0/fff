@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # fff - fucking fast file-manager.
-VER="2.98"
+VER="2.99"
 declare -A TABS_LOCATION
 FFF_HOME="${HOME}/.local/share/fff"
 FFF_RC="${FFF_HOME}/.fffrc"
@@ -15,6 +15,7 @@ FFF_MAXDEPTH=5
 FFF_TIMEOUT=20
 FFF_FILE_SIZE_THRESHOLD=-1
 FFF_DO_NOT_TRAVERSE_MOUNTS="-mount"
+FFF_TMUX_S=${FFF_TMUX_S:-fff}
 TMPDIR=${TMPDIR:-/tmp}
 group_by="d"
 group_filter=""
@@ -131,7 +132,7 @@ hcd() {
 
 rename_window() {
 	if [ "$FFF_MULTIPLEXER" != "" ]; then
-		tmux rename-window "$*"
+		tmux -L $FFF_TMUX_S rename-window "$*"
 	fi
 	if [ "$ZELLIJ_SESSION_NAME" != "" ]; then
 	     echo -ne "\033]0;$*\007" 
@@ -183,7 +184,13 @@ annotate() {
 	fi
 	clear_screen
         reset_terminal
-    	"${EDITOR:-vi}" "$note"
+	if [ "$FFF_MULTIPLEXER" != "" ]; then
+		pname="[N] $wname" 
+	    	tmux -L $FFF_TMUX_S split-window -h  "${EDITOR:-vi}" "$note"
+		tmux select-pane -T "$pname"
+	else
+    		"${EDITOR:-vi}" "$note"
+	fi
 	if [ -z "$note" ]; then
 		# remove note file if empty
 		rm "$note"
@@ -201,8 +208,6 @@ annotations_housekeeper() {
 	find $FFF_NOTES -name "*.md" > "$FFF_NOTES/.notes_list"
 	if [ $(cat "$FFF_NOTES/.notes_list" | wc -l) -gt 0 ]; then
 		echo "There are notes pointing to invalid files"
-#		echo -n "Specify path to look for changes [leave empty to skip]: "
-#		read -e searchpath
 		oldIFS=${IFS}
 		IFS="
 "
@@ -211,8 +216,16 @@ annotations_housekeeper() {
 		if [ ! -e "$target" ] ; then
 			nowrongtarget=0
 			echo "Target {$target} not found"
-			echo -n "Specify path to look for changes [leave empty to skip]: "
+			echo -n "Specify path to look for changes [leave empty to skip, use !!- to remove note, !!v to view note]: "
 			read -e searchpath
+			if [ "$searchpath" = "!!-" ]; then
+				rm ${notefile}
+				continue
+			fi
+			if [ "$searchpath" = "!!v" ]; then
+				$EDITOR ${notefile}
+				continue
+			fi
 			if [ "$searchpath" != "" ]; then
 				tname=$(basename "$target")
 				echo "Searching for $tname under $searchpath ..."
@@ -474,6 +487,7 @@ show_help() {
         ${FFF_KEY_GO_HOME:='~'}|${FFF_KEY_GO_HOME_ALT:=H}		Goto Home
         ${FFF_KEY_GO_TRASH:=t}		Goto Trash
         ${FFF_KEY_PREVIOUS:=-}		Goto Previous dir
+        ${FFF_KEY_UPPERDIR:=^}		Goto Upper dir
         ${FFF_KEY_GO_HIST:='\\'}		Goto History
         ${FFF_KEY_SCRATCHPAD:=P}		Goto ScratchPad dir
 	0		Bookmark menu - show/goto/save & load bookmarks file
@@ -1189,7 +1203,14 @@ open() {
 
                 clear_screen
                 reset_terminal
-                "${VISUAL:-${EDITOR:-vi}}" "$1"
+	    	if [ "$FFF_MULTIPLEXER" != "" ]; then
+			fname=$(basename "$1")
+			wname="[E] $fname" 
+	   	 	tmux -L $FFF_TMUX_S split-window -h  "${VISUAL:-${EDITOR:-vi}}" "$1"
+			tmux select-pane -T "$wname"
+		else
+                	"${VISUAL:-${EDITOR:-vi}}" "$1"
+		fi
                 setup_terminal
                 redraw
             ;;
@@ -2291,12 +2312,12 @@ key() {
 	    if [ "$TMUX" = "" ] && [ "$FFF_MULTIPLEXER" != "" ]; then
 		 export CURRENT_TAB
 		 if [ $(basename $SHELL) = fff ]; then
-	   	 	tmux new-window -t "$FFF_SESSION_NAME" -n "$wname" RUNSHELL
+	   	 	tmux -L $FFF_TMUX_S new-window -t "$FFF_SESSION_NAME" -n "$wname" RUNSHELL
 		 else
 	    		export FFF_MULTIPLEXER=$FFF_MULTIPLEXER
 			fff_dir=$(dirname $0)
 			fff_bin="$fff_dir/fff"
-	   	 	tmux new-window -n "$wname" $fff_bin 
+	   	 	tmux -L $FFF_TMUX_S new-window -n "$wname" $fff_bin 
 		 fi
 	    else
 	     	 export FFF_PS1="$myprompt"
@@ -2537,6 +2558,11 @@ key() {
             open "$OLDPWD"
         ;;
 
+        # Go to upper dir.
+        ${FFF_KEY_UPPERDIR:=^})
+            open ".."
+        ;;
+
         # Go to scratchpad dir.
         ${FFF_KEY_SCRATCHPAD:=P})
             open "$FFF_SCRATCHPAD_DIR"
@@ -2657,11 +2683,13 @@ key() {
 			return
 		 fi
 	         if [ "$FFF_MULTIPLEXER" != "" ]; then
-			wname=$(basename "${list[scroll]}")
-			rename_window "file:$wname" 
+			pname="[V] $(basename "${list[scroll]}")"
+	   	 	tmux -L $FFF_TMUX_S split-window -h  "${PAGER:-less}" "${list[scroll]}"
+			tmux select-pane -T "$pname"
+		 else
+		   	clear
+		 	"${PAGER:-less}" "${list[scroll]}"
 		 fi
-		 clear
-		 "${PAGER:-less}" "${list[scroll]}"
 		fi
 		restore_title
 	        setup_terminal
@@ -2890,6 +2918,17 @@ search_to_scratchpad() {
 	cd "$savedir"
 }
 main() {
+	# this code block is needed when in tmux - assuming vi as editor
+	# FIXME: manage different editors
+	in_Editor_with_file=$(ps -ef | awk -vppid=$PPID '{ if (($2==ppid) && index($10,"fff") && index($12,"vi")) print $NF }')
+	if [ "$in_Editor_with_file" != "" ]; then
+		pname=$(basename "$in_Editor_with_file")
+		tmux select-pane -T "[E] $pname"
+		$EDITOR "$in_Editor_with_file"
+		rc=$?
+		tmux select-pane -T "[V] $pname"
+		exit $rc
+	fi
     [[ "$1" == -c ]] && [[ "$2" == RUNSHELL ]] && {
             reset_terminal
             # Make fff aware of how many times it is nested.
@@ -2994,9 +3033,14 @@ main() {
 		echo "Running fff in tmux ..."
 		# check if already in tmux
 		if [ "$TMUX" != "" ]; then
-			echo "Already in tmux!"
+			TMUX_S=$(echo "$TMUX" | awk  -vFS=, '{print $1}'  | awk -vFS=/ '{print $NF}')
+			echo "Already in tmux (socket=$TMUX_S)!"
+			if [ "$TMUX_S" != "$FFF_TMUX_S" ]; then
+				echo "Forcing tmux socket to current one ($TMUX_S)"
+				export FFF_TMUX_S="$TMUX_S"
+			fi
 			# already in tmux
-			tmux_fff_session=$(tmux ls | awk '{ if ($1=="fff:") print $1}')
+			tmux_fff_session=$(tmux -L $FFF_TMUX_S ls 2>/dev/null | awk '{ if ($1=="fff:") print $1}')
 			if [ "$tmux_fff_session" != "" ]; then
 				export FFF_SESSION_NAME="fff"
 				# an fff session for tmux already exists
@@ -3007,7 +3051,8 @@ main() {
 				exit 0	
 			fi # tmux fff session check
 		else
-			# not tmux sessions
+			# no tmux sessions
+			export true_SHELL="$SHELL"
 			export SHELL="$FFF"
     			tmuxcfg="${XDG_CACHE_HOME:=${HOME}/.cache}/fff/fff_tmux.conf"
 cat << EOTMUXCFG > "$tmuxcfg"
@@ -3019,16 +3064,18 @@ set-option -g status-position top
 # mouse settings
 ## new tmux versions mouse settings
 set-option -g mouse on
+set-option -g default-shell $SHELL
+
 
 
 #set-option -g status-style "fg=green,bg=black" 
-set-option -g status-style "fg=blue,bg=cyan" 
+set-option -g status-style "fg=black,bg=cyan" 
 #setw -g window-status-current-style fg=colour123,bg=colour20 
 # for tmux 2.x
 setw -g window-status-current-style fg=white,bg=blue
 set-window-option  -g mode-keys vi
 EOTMUXCFG
-			tmux -f "$tmuxcfg" new-session -A -s "$FFF_SESSION_NAME"
+			tmux -L $FFF_TMUX_S -f "$tmuxcfg" new-session -A -s "$FFF_SESSION_NAME"
         		exit 0
           	fi # check if already in tmux
 	fi # has tmux
