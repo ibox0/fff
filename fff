@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # fff - fucking fast file-manager.
-VER="2.99"
+VER="2.99d"
 declare -A TABS_LOCATION
 FFF_HOME="${HOME}/.local/share/fff"
 FFF_RC="${FFF_HOME}/.fffrc"
@@ -429,12 +429,56 @@ show_colors() {
     done
 }
 
+# returns the weblink of pointed file
+# this will enable to open fff from a web link, by using dedicated web mechanism like the open_fff cgi script
+# FFF_BASEURL (mandatory) shall be set to the base url to be prepended by the file url
+# FFF_link_ALL_FOLDERS (optional) can be set to 1 to allow use of absolute paths in links
+# do_not_resolve_FFF_TAGS (optional) can be set to 1 to avoid symlink resolution for the path of FFF_TAGS (has sense if FFF_link_ALL_FOLDERS is disabled)
+#
+# Note: for link to files, fff opens in the directory containing the file
+get_file_weblink() {
+	if [ "$FFF_BASEURL" != "" ]; then
+		if [ "$do_not_resolve_FFF_TAGS" = 1 ]; then
+			effective_FFF_TAGS="$FFF_TAGS"
+		else
+			effective_FFF_TAGS=$(cd -P "$FFF_TAGS";pwd)
+		fi
+		local_tab_url=$(echo "${list[scroll]}" | awk -vmybaseurl="$FFF_BASEURL" -vALL_FOLDERS=$FFF_link_ALL_FOLDERS -vFFF_TAGS="$effective_FFF_TAGS" '{ 
+		n=length(FFF_TAGS)
+#		print substr($0,1,n) " vs "  FFF_TAGS  " ALL_FOLDERS=" ALL_FOLDERS; exit 
+		if (ALL_FOLDERS || (substr($0,1,n) == FFF_TAGS)) 
+{ url=$0; if (!ALL_FOLDERS) sub(FFF_TAGS,"",url) ; gsub("#","%23",url); gsub(" ","%20",url); gsub("/","%C2%A7",url);  if (url) print "Url to open this tag folder: " mybaseurl "id=" url ; }}')
+	else
+		local_tab_url=""
+	fi
+	echo "$local_tab_url"
+}
+
+# Show weblink of current file
+show_weblink() {
+	reset_terminal
+	local_file_url=$(get_file_weblink)
+	sel_obj=$(basename "${list[scroll]}")
+	clear_screen
+	echo ""
+	echo "Use the following weblink to open $sel_obj with fff from web"
+	echo ""
+	echo "$local_file_url"
+	echo ""
+	echo "Type RETURN to continue"
+	read ans
+        setup_terminal
+        redraw full
+}
+
 # show help page
 show_help() {
 	header="----------------------------------"
 	reset_terminal
+	
+	local_file_url=$(get_file_weblink)
+	# ---------------------- local_file_url=$local_file_url FFF_BASEURL=$FFF_BASEURL"
 	cat << EOH | ${PAGER:-less}
-
 	FFF v. $VER
 
 	$header Selection of items
@@ -443,7 +487,7 @@ show_help() {
         ${FFF_KEY_LINK:=s}|${FFF_KEY_LINK_ALL:=S}		Mark file/ALL for symlink
         ${FFF_KEY_TRASH:=d}|${FFF_KEY_TRASH_ALL:=D}		Mark file/ALL for deletion (to trash)
         ${FFF_KEY_BULK_RENAME:=b}|${FFF_KEY_BULK_RENAME_ALL:=B}		Mark file/ALL for bulk rename
-	${FFF_KEY_SYMLINK_DEREFERENCE:="^"}		Switch betweeen copy link/file for linked files
+	${FFF_KEY_SYMLINK_DEREFERENCE:="%"}		Switch betweeen copy link/file for linked files
         ${FFF_KEY_CLEAR:=c}		Clear selection
 
 	$header Move / View modes in current list
@@ -482,6 +526,7 @@ show_help() {
         ${FFF_KEY_SHOW_FILES_VERBOSE:=L}       	Show attributes, sizes and dates of current list
         ${FFF_KEY_EXECUTABLE:=X}		Mark file as executable
         ${FFF_KEY_IMAGE:=i}		Show image
+        ${FFF_KEY_WEBLINK:=W}		Show web link to open file with fff
 	$header Directory navigation and bookmarks
         ${FFF_KEY_GO_DIR:=:}		Goto Dir
         ${FFF_KEY_GO_HOME:='~'}|${FFF_KEY_GO_HOME_ALT:=H}		Goto Home
@@ -515,6 +560,8 @@ show_help() {
 
 	When done, chmod 755 fff
 	You can now start the game!
+
+	$local_file_url
 
 	Local fff saved data location: ${FFF_HOME}
 EOH
@@ -2074,8 +2121,13 @@ while [ \$doloop -eq 1 ]; do
 				
 				echo ""
 				echo "----------------------------------------------------"
-				echo "Execution completed - Press RETURN to go back to FFF"
-				read k
+				echo "Execution completed - Press RETURN to go back to FFF "
+				echo "Type any char and RETURN to keep this screen open"
+				read -t 5 k
+				if [ "\$k" != "" ]; then
+					echo "Timeout is now disabled - Press RETURN to go back to FFF"
+					read k
+				fi
 				doloop=0
 			fi
 		else
@@ -2505,7 +2557,11 @@ key() {
 		fi
 		echo ""
 		echo "Use $FFF_KEY_SHOW_FILES_VERBOSE to show full list of files"
-                read -ern 1
+                read -erN 1 anscmd
+		# space in this view opens viewer for the file
+		if [ "$anscmd" = " " ] && [ ! -d "${list[scroll]}" ]; then 
+		    	$PAGER "${list[scroll]}"
+		fi
                 redraw
             else 
 	    	notify -d 5 Cannot open "${list[scroll]}"
@@ -2528,6 +2584,11 @@ key() {
         # Show image in terminal.
         ${FFF_KEY_IMAGE:=i})
             draw_img
+        ;;
+
+        # Show file weblink in terminal.
+        ${FFF_KEY_WEBLINK:=W})
+            show_weblink
         ;;
 
         # Go to dir.
@@ -2633,6 +2694,13 @@ key() {
             [[ ${FFF_CD_ON_EXIT:=1} == 1 ]] &&
                 printf '%s\n' "$PWD" > "$FFF_CD_FILE"
 
+	    if [ "$FFF_MULTIPLEXER" != "" ]; then
+	    	hn=$HOSTNAME
+	        rename_window "$hn"
+	        echo -ne "\033]0;$hn\007" 
+	    fi
+	    redraw full
+	    clear
             exit
         ;;
 	# Ask for bookmark number and set it to current dir
@@ -2772,7 +2840,7 @@ key() {
 	${FFF_KEY_TAB_MENU:=","} | $'\t' )
 	   tabs_menu
 	   ;;
-	${FFF_KEY_SYMLINK_DEREFERENCE:="^"})
+	${FFF_KEY_SYMLINK_DEREFERENCE:="%"})
            if [ "${FFF_DEREFERENCE_SYMLINKS}" != "" ]; then
 		FFF_DEREFERENCE_SYMLINKS=""
 		notify "Dereference symlinks is OFF"
@@ -3044,9 +3112,12 @@ main() {
 			if [ "$tmux_fff_session" != "" ]; then
 				export FFF_SESSION_NAME="fff"
 				# an fff session for tmux already exists
+				echo "Attaching tmux session \"$FFF_TMUX_S\" ..."
 				fff
 				exit 0
 			else
+				export FFF_TMUX_S=$(basename "$TMUX" | awk -vFS=, '{ print $1 }')
+				echo "Attaching tmux session \"$FFF_TMUX_S\" ..."
 				fff 
 				exit 0	
 			fi # tmux fff session check
@@ -3198,6 +3269,7 @@ export PAGER=${PAGER:-less}
 export EDITOR=${EDITOR:-vi}
 export VISUAL=${VISUAL:-vi}
 restore_title
+hcd "$PWD"
 main "$@"
 
 
