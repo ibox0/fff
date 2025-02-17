@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # fff - fucking fast file-manager.
-VER="2.99d"
+VER="3.0c"
 declare -A TABS_LOCATION
 FFF_HOME="${HOME}/.local/share/fff"
 FFF_RC="${FFF_HOME}/.fffrc"
@@ -151,6 +151,64 @@ restore_title() {
 			rename_window "[$CURRENT_TAB]:$wname"
 		fi
 }
+
+# presence of this file is used to compute contents of nodes to show in sidepanel (notes_panel)
+FFF_NOTES_PANEL_FILE="$TMPDIR/FFF_notespanel.$$.txt"
+notes_panel() {
+	# notes panel is available only in tmux mode
+	if [ "$FFF_MULTIPLEXER" != "" ]; then
+		monitorscript="$TMPDIR/fff_monitorfile.$$.sh"
+		cat << "EOM" > "$monitorscript"
+#!/bin/sh
+VERSION=1
+MINOR=1
+PROGRAM="$1"
+FILE="$2"
+mtime=$(stat -c "%Y" "$FILE")
+
+if [ ! -e "$FILE" ]; then
+	echo "$FILE not found"
+	exit 1
+fi
+$PROGRAM "$FILE"  &
+if [ $? -ne 0  ]; then
+	echo "Error running $PROGRAM - cannot continue"
+	exit 1
+fi
+child="$!"
+domonitor=1
+while [ $domonitor -eq 1 ]; do
+	if [ ! -e "$FILE" ]; then
+		if [ "$child" != "" ]; then kill "$child" ; child="" ; fi
+		echo "No notes for this file"
+	fi
+	curtime=$(stat -c "%Y" "$FILE")
+	if [ $curtime != $mtime ]; then
+		if [ "$child" != "" ]; then kill "$child" ; child="" ; fi
+		mtime=$(stat -c "%Y" "$FILE")
+		$PROGRAM "$FILE"  &
+		child="$!"
+	fi
+	sleep 1
+	# check if child is still alive
+	if ! ps -p "$child" > /dev/null ; then
+		domonitor=0
+	fi
+done # while domonitor
+EOM
+	    # added to remove monitoring and panel management when panel is closed
+	    echo "rm \"$FFF_NOTES_PANEL_FILE\" 2>/dev/null" >> "$monitorscript"
+	    # added to cleanup monitorscript when panel is closed
+	    echo "rm \"$monitorscript\"" >> "$monitorscript"
+	    chmod 755 "$monitorscript"
+	    touch "$FFF_NOTES_PANEL_FILE"
+	    tmux split-window -h "$monitorscript" "$PAGER" "$FFF_NOTES_PANEL_FILE"  
+	    tmux last-pane
+	else
+		notify "tmux not eanbled - Monitor mode is not available"
+	fi
+} # notes_panel
+
 compute_note_name() {
 	if [ "$1" = symlink ]; then 
 	   if [ -L "${list[scroll]}" ]; then
@@ -376,13 +434,14 @@ build_tags() {
 	notify "Tag rebuild completed (added $ntagged tagged objects in $ntag tags) ..."
 }
 
-# search in annoated files, creates links to found notes and pointed files
+# search in annotated files, creates links to found notes and pointed files
 search_annotate() {
 	notespad="${XDG_DATA_HOME:=${HOME}/.local/share}/fff/.notespad" 
 	if [ ! -d "$notespad" ]; then
 		mkdir -p "$notespad"
 	fi
-	cmd_line "Search notes: "
+	# patterns like -e orword1 -e orword2 -e "or prhase" +andword +andword
+	cmd_line "Search notes (use * to show all notes): "
 	if [ "$cmd_reply" != "" ]; then
 		mstr="$cmd_reply"
 		if [ "$cmd_reply" = "*" ]; then
@@ -392,7 +451,17 @@ search_annotate() {
 		fi
 		# clean existing findings
 		rm -f $notespad/* 2> /dev/null
-		grep -rli "$cmd_reply" "$FFF_NOTES" | while read found_note ; do
+		#grep -rli "$cmd_reply" "$FFF_NOTES" | while read found_note ; do
+		search_pattern=$(echo "$cmd_reply" | awk -vFS="+" '{print $1}')
+		and_pattern=$(echo "$cmd_reply" | awk -vFS="+" '{pat="" ; for (i=2;i<=NF;i++) { sub("[ ]+","",$2); pat=pat " -e " $i ;  } ; print pat }')
+		eval grep -rli $search_pattern "$FFF_NOTES" | while read found_note ; do
+			if [ "$and_pattern" != ""  ]; then
+				grep -i $and_pattern "$found_note" > /dev/null
+				rc=$?
+				if [ $rc -ne 0 ]; then
+					continue
+				fi
+			fi
 			notename=$(basename "$found_note")
 			ln -s "$found_note" "$notespad/$notename"
 			target=$(awk -vFS="# Notes For: " '{ if (NF>1) print $NF}' "$found_note")
@@ -502,6 +571,7 @@ show_help() {
         ${FFF_KEY_HIDDEN:=.}		Show/Hide hidden files
         ${FFF_KEY_SIZE:=_}		View 0 size files, all non zero files, all files or files greater than specified size
         ${FFF_KEY_SETTINGS:=@}		View/Change Settings
+        ${FFF_KEY_EXTERNAL_FM:=&}		Open current folder in external file manager
         ${FFF_KEY_SORT_ORDER:=o}		Set Sort order
         ${FFF_KEY_GROUP_FILTER:="|"}		Set Group filter (string to filter when showing in "Grouped by")
         ${FFF_KEY_SWITCH_SORT_ORDER:=O}		Switch Sort order
@@ -544,6 +614,7 @@ show_help() {
 	${FFF_KEY_TAB_MENU:=","}|Tab		Tab Menu (switch to tab, close tab, create tab, save or load tabs)
 	$header Annotations and Tags
         ${FFF_KEY_ANNOTATE:="N"}		Annotate file or folder
+        ${FFF_KEY_NOTES_PANEL:="V"}		Show/Hide notes panel (tmux required)
         ${FFF_KEY_SEARCH_NOTES:="'"}		Search for annotated files
         ${FFF_KEY_HK_NOTES:="U"}		Annotation housekeeper
         ${FFF_KEY_TAGS:="T"}		Go to Tags folder
@@ -760,7 +831,22 @@ get_mime_type() {
 status_line() {
     # Status_line to print when files are marked for operation.
     local mark_ui="[${#marked_files[@]}] selected (${file_program[*]}) [p] ->"
-
+    if [ -e "$FFF_NOTES_PANEL_FILE" ]; then
+	# status panel is opened
+	note=$(compute_note_name)
+	if [ -e "$note" ]; then 
+		# copy note for current file to status panel
+	    	cp "$note" "$FFF_NOTES_PANEL_FILE" 
+		echo -e "\n\n----[info]------------" >> "$FFF_NOTES_PANEL_FILE" 
+	    	stat "${list[scroll]}" >> "$FFF_NOTES_PANEL_FILE" 
+	else
+		# note is not present, copy to panel some file info
+		echo -e "----[info]------------" > "$FFF_NOTES_PANEL_FILE" 
+	    	stat "${list[scroll]}" >> "$FFF_NOTES_PANEL_FILE" 
+	fi
+    	echo "" >> "$FFF_NOTES_PANEL_FILE" 
+    	echo "" >> "$FFF_NOTES_PANEL_FILE" 
+    fi
     # Escape the directory string.
     # Remove all non-printable characters.
     PWD_escaped=${PWD//[^[:print:]]/^[}
@@ -1253,7 +1339,9 @@ open() {
 	    	if [ "$FFF_MULTIPLEXER" != "" ]; then
 			fname=$(basename "$1")
 			wname="[E] $fname" 
-	   	 	tmux -L $FFF_TMUX_S split-window -h  "${VISUAL:-${EDITOR:-vi}}" "$1"
+	   	 	#tmux -L $FFF_TMUX_S split-window -h  "${VISUAL:-${EDITOR:-vi}}" "$1"
+			# use PAGER with VISUAL to switch like vv that is faster 
+	   	 	tmux -L $FFF_TMUX_S split-window -h  "$PAGER" "$1"
 			tmux select-pane -T "$wname"
 		else
                 	"${VISUAL:-${EDITOR:-vi}}" "$1"
@@ -1761,6 +1849,11 @@ bookmarks_menu() {
 	   # save bookmark list
 	   if [[ "$cmd_reply" == "s" ]]; then
 		cd "$FFF_BOOKMARKS_DIR"
+		reset_terminal
+		clear
+		echo "-----------"
+		ls 
+		echo "-----------"
 		cmd_line "bookmarks file name?: "
 		cd - > /dev/null
                 if [[ "$cmd_reply" != ""  ]]; then
@@ -1790,6 +1883,11 @@ EOTT
 	   # load bookmark list
 	   if [[ "$cmd_reply" == "l" ]]; then
 		cd "$FFF_BOOKMARKS_DIR"
+		reset_terminal
+		clear
+		echo "-----------"
+		ls 
+		echo "-----------"
 		cmd_line "bookmarks file name?: "
 		cd - > /dev/null
                 if [[ "$cmd_reply"  ]]; then
@@ -2778,6 +2876,13 @@ key() {
         ${FFF_KEY_ANNOTATE:="N"})
 			annotate
 	   ;;
+        ${FFF_KEY_NOTES_PANEL:="V"})
+	    		if [ -e "$FFF_NOTES_PANEL_FILE" ]; then
+				rm "$FFF_NOTES_PANEL_FILE" 
+			else
+				notes_panel
+			fi
+	   ;;
         ${FFF_KEY_SEARCH_NOTES:="'"})
 			search_annotate
 	   ;;
@@ -2880,6 +2985,10 @@ key() {
 
         ${FFF_KEY_SETTINGS:="@"})
 			settings_page
+			;;
+
+        ${FFF_KEY_EXTERNAL_FM:="&"})
+			xdg-open "$PWD"
 			;;
 
         ${FFF_KEY_CLIPCOPY:="I"})
@@ -3274,10 +3383,9 @@ main "$@"
 
 
 ############ How to get list of available keys
-# create help dump:
-# 	open help (?), hit "s" and type a temporary file name
 # use this script 
-# cat TEMPORARYFILENAME | awk '{ if ($1) print $1}' | grep -v -e To -e cat -e Then -e Local -e "\-\-\-" -e FFF | awk '{ n=split($1,a,"|"); if ((n>1) && a[1]) for (i=1;i<=n;i++) is_managed[a[i]]=n ; else is_managed[$1]=1 } END { for (i=32;i<=127;i++) { ch=sprintf("%c",i) ; if (!is_managed[ch]) printf "%d=%c\n",i,i } }'
+# grep FFF_KEY fff | grep ")" | awk -vFS=":=" '{print $NF}' | awk -vFS="|" '{print $1}' |  awk '{gsub("\"",""); gsub(")",""); gsub("}",""); gsub("\x27","") ; print $1 ; print "\x27" ; print "\"" ; print " "; print "|"; for (i=0;i<=9;i++) print i }' | grep -v "^$" | grep -v "?" |awk '{ ch=substr($0,1,1); managed[ch]=1 } END{ for (i=32;i<=127;i++) { ch=sprintf("%c",i) ; if (!managed[ch]) printf "%d=%c\n",i,i } }'
+
 
 ######################### TODO
 # - grouped views of symlinks does not work (this is due to missing -L option) (see -L opt below)
